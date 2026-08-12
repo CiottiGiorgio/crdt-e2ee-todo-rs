@@ -3,9 +3,8 @@ mod constants;
 mod models;
 mod repository;
 
-use repository::sqlite::SqliteTodoRepo;
+use repository::automerge::AutomergeTodoRepo;
 use repository::TodoRepository;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -38,26 +37,14 @@ pub fn run() {
                     .expect("failed to create app data directory");
             }
 
-            let db_path = app_data_dir.join(constants::DB_FILE_NAME);
-            println!("SQLite database location: {:?}", db_path);
+            let doc_path = app_data_dir.join(constants::AUTOMERGE_FILE_NAME);
+            println!("Automerge document location: {:?}", doc_path);
 
-            let options = SqliteConnectOptions::new()
-                .filename(&db_path)
-                .create_if_missing(true);
+            let repo = AutomergeTodoRepo::new(Some(doc_path))
+                .expect("failed to initialize automerge repository");
 
-            tauri::async_runtime::block_on(async move {
-                let pool = SqlitePoolOptions::new()
-                    .connect_with(options)
-                    .await
-                    .expect("failed to connect to sqlite database");
-
-                let repo = SqliteTodoRepo::new(pool)
-                    .await
-                    .expect("failed to initialize repository");
-
-                app.manage(AppState {
-                    todo_repo: Arc::new(repo),
-                });
+            app.manage(AppState {
+                todo_repo: Arc::new(repo),
             });
 
             Ok(())

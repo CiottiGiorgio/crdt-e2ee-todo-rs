@@ -18,7 +18,7 @@ pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoIt
 #[tauri::command]
 #[specta::specta]
 pub async fn update_todo_status(
-    id: i32,
+    id: String,
     status: TodoStatus,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -27,7 +27,7 @@ pub async fn update_todo_status(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn delete_todo(id: i32, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), String> {
     state.todo_repo.delete(id).await
 }
 

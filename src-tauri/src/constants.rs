@@ -1,1 +1,1 @@
-pub const DB_FILE_NAME: &str = "todo.db";
+pub const AUTOMERGE_FILE_NAME: &str = "todo.automerge";

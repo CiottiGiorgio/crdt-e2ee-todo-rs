@@ -6,13 +6,13 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 export const commands = {
 	getTodos: () => typedError<TodoItem[], string>(__TAURI_INVOKE("get_todos")),
 	addTodo: (text: string) => typedError<TodoItem, string>(__TAURI_INVOKE("add_todo", { text })),
-	updateTodoStatus: (id: number, status: TodoStatus) => typedError<null, string>(__TAURI_INVOKE("update_todo_status", { id, status })),
-	deleteTodo: (id: number) => typedError<null, string>(__TAURI_INVOKE("delete_todo", { id })),
+	updateTodoStatus: (id: string, status: TodoStatus) => typedError<null, string>(__TAURI_INVOKE("update_todo_status", { id, status })),
+	deleteTodo: (id: string) => typedError<null, string>(__TAURI_INVOKE("delete_todo", { id })),
 };
 
 /* Types */
 export type TodoItem = {
-	id: number,
+	id: string,
 	text: string,
 	status: TodoStatus,
 };

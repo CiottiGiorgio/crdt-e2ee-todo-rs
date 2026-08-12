@@ -39,7 +39,7 @@
     }
   }
 
-  async function updateStatus(id: number, newStatus: TodoStatus) {
+  async function updateStatus(id: string, newStatus: TodoStatus) {
     const todo = todos.find((t) => t.id === id);
     if (!todo) return;
     const oldStatus = todo.status;
@@ -51,7 +51,7 @@
     }
   }
 
-  async function deleteTodo(id: number) {
+  async function deleteTodo(id: string) {
     const original = [...todos];
     todos = todos.filter((t) => t.id !== id);
     const res = await commands.deleteTodo(id);
