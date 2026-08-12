@@ -6,11 +6,12 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use shared::{ClientMessage, EncryptedPayload, ServerMessage};
+use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
@@ -26,14 +27,86 @@ struct SyncStore {
     snapshot: Option<(u64, EncryptedPayload)>,
     deltas: Vec<(u64, EncryptedPayload)>,
     next_seq_id: u64,
+    pool: SqlitePool,
 }
 
 impl SyncStore {
-    fn new() -> Self {
+    async fn new(pool: SqlitePool) -> Self {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS snapshot (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                seq_id INTEGER NOT NULL,
+                ciphertext BLOB NOT NULL,
+                nonce BLOB NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create snapshot table");
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS deltas (
+                seq_id INTEGER PRIMARY KEY,
+                ciphertext BLOB NOT NULL,
+                nonce BLOB NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create deltas table");
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value INTEGER NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("Failed to create metadata table");
+
+        // Load next_seq_id
+        let next_seq_id: u64 = sqlx::query_scalar::<_, i64>("SELECT value FROM metadata WHERE key = 'next_seq_id'")
+            .fetch_optional(&pool)
+            .await
+            .unwrap_or(None)
+            .map(|v| v as u64)
+            .unwrap_or(1);
+
+        // Load snapshot
+        let snapshot_row = sqlx::query("SELECT seq_id, ciphertext, nonce FROM snapshot WHERE id = 1")
+            .fetch_optional(&pool)
+            .await
+            .unwrap_or(None);
+
+        let snapshot = snapshot_row.map(|row| {
+            let seq_id: i64 = row.get(0);
+            let ciphertext: Vec<u8> = row.get(1);
+            let nonce: Vec<u8> = row.get(2);
+            (seq_id as u64, EncryptedPayload { ciphertext, nonce })
+        });
+
+        // Load deltas
+        let delta_rows = sqlx::query("SELECT seq_id, ciphertext, nonce FROM deltas ORDER BY seq_id ASC")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+
+        let deltas = delta_rows
+            .into_iter()
+            .map(|row| {
+                let seq_id: i64 = row.get(0);
+                let ciphertext: Vec<u8> = row.get(1);
+                let nonce: Vec<u8> = row.get(2);
+                (seq_id as u64, EncryptedPayload { ciphertext, nonce })
+            })
+            .collect();
+
         Self {
-            snapshot: None,
-            deltas: Vec::new(),
-            next_seq_id: 1,
+            snapshot,
+            deltas,
+            next_seq_id,
+            pool,
         }
     }
 }
@@ -42,9 +115,16 @@ impl SyncStore {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    let pool = SqlitePoolOptions::new()
+        .connect("sqlite://sync_store.db?mode=rwc")
+        .await
+        .expect("Failed to connect to SQLite with sqlx");
+
+    let sync_store = SyncStore::new(pool).await;
+
     let (tx, _rx) = broadcast::channel::<(usize, ServerMessage)>(100);
     let state = AppState {
-        store: Arc::new(Mutex::new(SyncStore::new())),
+        store: Arc::new(Mutex::new(sync_store)),
         tx,
     };
 
@@ -57,7 +137,7 @@ async fn main() {
         .await
         .expect("Failed to bind server port 3000");
 
-    info!("Dumb Relay Server listening on ws://0.0.0.0:3000/ws");
+    info!("Dumb Relay Server (powered by SQLx) listening on ws://0.0.0.0:3000/ws");
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -80,7 +160,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Send Welcome message immediately with current highest seq_id
     let highest_seq_id = {
-        let store = state.store.lock().unwrap();
+        let store = state.store.lock().await;
         store
             .deltas
             .last()
@@ -125,7 +205,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 match client_msg {
                     ClientMessage::RequestSync { from_seq_id } => {
                         let (snapshot, deltas_to_send) = {
-                            let store = state.store.lock().unwrap();
+                            let store = state.store.lock().await;
                             let snap_seq = store.snapshot.as_ref().map(|(seq, _)| *seq).unwrap_or(0);
 
                             if from_seq_id < snap_seq {
@@ -160,8 +240,27 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     ClientMessage::Delta { payload, .. } => {
                         let seq_id = {
-                            let mut store = state.store.lock().unwrap();
+                            let mut store = state.store.lock().await;
                             let seq = store.next_seq_id;
+
+                            // Save to SQLite via sqlx
+                            let mut tx = store.pool.begin().await.unwrap();
+                            sqlx::query("INSERT INTO deltas (seq_id, ciphertext, nonce) VALUES (?, ?, ?)")
+                                .bind(seq as i64)
+                                .bind(&payload.ciphertext)
+                                .bind(&payload.nonce)
+                                .execute(&mut *tx)
+                                .await
+                                .unwrap();
+
+                            sqlx::query("INSERT OR REPLACE INTO metadata (key, value) VALUES ('next_seq_id', ?)")
+                                .bind((seq + 1) as i64)
+                                .execute(&mut *tx)
+                                .await
+                                .unwrap();
+
+                            tx.commit().await.unwrap();
+
                             store.next_seq_id += 1;
                             store.deltas.push((seq, payload.clone()));
                             seq
@@ -181,16 +280,40 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         payload,
                     } => {
                         let updated = {
-                            let mut store = state.store.lock().unwrap();
+                            let mut store = state.store.lock().await;
                             let current_snap_seq =
                                 store.snapshot.as_ref().map(|(seq, _)| *seq).unwrap_or(0);
 
                             if covers_seq_id >= current_snap_seq {
+                                let new_next_seq_id = store.next_seq_id.max(covers_seq_id + 1);
+
+                                // Save to SQLite via sqlx
+                                let mut tx = store.pool.begin().await.unwrap();
+                                sqlx::query("INSERT OR REPLACE INTO snapshot (id, seq_id, ciphertext, nonce) VALUES (1, ?, ?, ?)")
+                                    .bind(covers_seq_id as i64)
+                                    .bind(&payload.ciphertext)
+                                    .bind(&payload.nonce)
+                                    .execute(&mut *tx)
+                                    .await
+                                    .unwrap();
+
+                                sqlx::query("DELETE FROM deltas WHERE seq_id <= ?")
+                                    .bind(covers_seq_id as i64)
+                                    .execute(&mut *tx)
+                                    .await
+                                    .unwrap();
+
+                                sqlx::query("INSERT OR REPLACE INTO metadata (key, value) VALUES ('next_seq_id', ?)")
+                                    .bind(new_next_seq_id as i64)
+                                    .execute(&mut *tx)
+                                    .await
+                                    .unwrap();
+
+                                tx.commit().await.unwrap();
+
                                 store.snapshot = Some((covers_seq_id, payload.clone()));
-                                // Prune deltas covered by this snapshot
                                 store.deltas.retain(|(seq, _)| *seq > covers_seq_id);
-                                // Ensure next_seq_id is ahead of the newly accepted snapshot sequence ID
-                                store.next_seq_id = store.next_seq_id.max(covers_seq_id + 1);
+                                store.next_seq_id = new_next_seq_id;
                                 true
                             } else {
                                 false

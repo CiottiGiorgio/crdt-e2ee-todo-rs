@@ -40,10 +40,11 @@ pub fn run() {
                     .expect("failed to create app data directory");
             }
 
-            println!("Initializing in-memory Automerge document for client...");
+            let doc_path = app_data_dir.join(constants::AUTOMERGE_FILE_NAME);
+            println!("Initializing Automerge document at: {:?}", doc_path);
 
             let repo = Arc::new(
-                AutomergeTodoRepo::new(None)
+                AutomergeTodoRepo::new(Some(doc_path))
                     .expect("failed to initialize automerge repository"),
             );
 
