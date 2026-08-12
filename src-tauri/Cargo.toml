@@ -28,6 +28,9 @@ specta = "2.0.0-rc.20"
 specta-typescript = "0.0.12"
 tauri-specta = { version = "2.0.0-rc.20", features = ["javascript", "typescript"] }
 
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

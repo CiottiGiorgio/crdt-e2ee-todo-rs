@@ -59,3 +59,53 @@ impl TodoRepository for SqliteTodoRepo {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn setup_repo() -> SqliteTodoRepo {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("Failed to create in-memory database");
+
+        SqliteTodoRepo::new(pool)
+            .await
+            .expect("Failed to initialize repo and run migrations")
+    }
+
+    #[tokio::test]
+    async fn test_add_todo_and_get_all() {
+        let repo = setup_repo().await;
+
+        let added = repo.add("Test writing Rust tests".to_string()).await.unwrap();
+        assert_eq!(added.text, "Test writing Rust tests");
+        assert_eq!(added.status, TodoStatus::WorkingSet);
+
+        let todos = repo.get_all().await.unwrap();
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].id, added.id);
+    }
+
+    #[tokio::test]
+    async fn test_update_status() {
+        let repo = setup_repo().await;
+
+        let todo = repo.add("Buy groceries".to_string()).await.unwrap();
+        repo.update_status(todo.id, TodoStatus::Completed).await.unwrap();
+
+        let todos = repo.get_all().await.unwrap();
+        assert_eq!(todos[0].status, TodoStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_delete_is_soft_delete() {
+        let repo = setup_repo().await;
+
+        let todo = repo.add("To be deleted".to_string()).await.unwrap();
+        repo.delete(todo.id).await.unwrap();
+
+        let todos = repo.get_all().await.unwrap();
+        assert!(todos.is_empty());
+    }
+}
