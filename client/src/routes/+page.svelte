@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import { commands, type TodoItem, type TodoStatus } from "$lib/bindings";
 
+  import { listen } from "@tauri-apps/api/event";
+
   let todos = $state<TodoItem[]>([]);
 
   async function loadTodos() {
@@ -15,6 +17,12 @@
 
   onMount(() => {
     loadTodos();
+    const unlistenPromise = listen("todos-updated", () => {
+      loadTodos();
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
   });
 
   let isBacklogOpen = $state(false);

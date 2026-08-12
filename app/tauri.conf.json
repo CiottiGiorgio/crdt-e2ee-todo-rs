@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.todo-app.app",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run dev --prefix client",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
-    "frontendDist": "../build"
+    "beforeBuildCommand": "npm run build --prefix client",
+    "frontendDist": "../client/build"
   },
   "app": {
     "windows": [

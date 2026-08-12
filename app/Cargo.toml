@@ -28,15 +28,12 @@ async-trait = "0.1"
 specta = "2.0.0-rc.20"
 specta-typescript = "0.0.12"
 tauri-specta = { version = "2.0.0-rc.20", features = ["javascript", "typescript"] }
+shared = { path = "../shared" }
+aes-gcm = "0.10"
+rand = "0.8"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-
-
-# Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = 3
-panic = "abort"
-strip = true

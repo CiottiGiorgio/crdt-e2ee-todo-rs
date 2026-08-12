@@ -1,8 +1,11 @@
 mod commands;
 mod constants;
+mod crypto;
 mod models;
 mod repository;
+mod sync;
 
+use crypto::CryptoEngine;
 use repository::automerge::AutomergeTodoRepo;
 use repository::TodoRepository;
 use std::sync::Arc;
@@ -20,7 +23,7 @@ pub fn run() {
     builder
         .export(
             specta_typescript::Typescript::default(),
-            "../src/lib/bindings.ts",
+            "../client/src/lib/bindings.ts",
         )
         .expect("Failed to export specta typescript bindings");
 
@@ -37,14 +40,26 @@ pub fn run() {
                     .expect("failed to create app data directory");
             }
 
-            let doc_path = app_data_dir.join(constants::AUTOMERGE_FILE_NAME);
-            println!("Automerge document location: {:?}", doc_path);
+            println!("Initializing in-memory Automerge document for client...");
 
-            let repo = AutomergeTodoRepo::new(Some(doc_path))
-                .expect("failed to initialize automerge repository");
+            let repo = Arc::new(
+                AutomergeTodoRepo::new(None)
+                    .expect("failed to initialize automerge repository"),
+            );
+
+            // Shared E2EE Symmetric Key (32 bytes)
+            let master_key = [42u8; 32];
+            let crypto = Arc::new(CryptoEngine::new(&master_key));
+
+            let sync_tx = sync::start_sync_worker(
+                repo.clone(),
+                crypto,
+                app.handle().clone(),
+            );
+            repo.set_sync_notifier(sync_tx);
 
             app.manage(AppState {
-                todo_repo: Arc::new(repo),
+                todo_repo: repo,
             });
 
             Ok(())

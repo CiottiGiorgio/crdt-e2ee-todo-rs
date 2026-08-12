@@ -10,6 +10,7 @@ use crate::repository::TodoRepository;
 pub struct AutomergeTodoRepo {
     doc: RwLock<AutoCommit>,
     file_path: Option<PathBuf>,
+    sync_tx: RwLock<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
 }
 
 impl AutomergeTodoRepo {
@@ -28,14 +29,51 @@ impl AutomergeTodoRepo {
         Ok(Self {
             doc: RwLock::new(doc),
             file_path,
+            sync_tx: RwLock::new(None),
         })
     }
 
-    fn save_internal(&self, doc: &mut AutoCommit) -> Result<(), String> {
+    pub fn set_sync_notifier(&self, tx: tokio::sync::mpsc::UnboundedSender<()>) {
+        if let Ok(mut guard) = self.sync_tx.write() {
+            *guard = Some(tx);
+        }
+    }
+
+    pub fn get_doc_bytes(&self) -> Vec<u8> {
+        if let Ok(mut doc) = self.doc.write() {
+            doc.save()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn merge_incoming(&self, incoming: &mut AutoCommit) -> Result<(), String> {
+        let mut doc = self.doc.write().map_err(|e| e.to_string())?;
+        doc.merge(incoming).map_err(|e| e.to_string())?;
+        self.save_to_disk(&mut doc)?;
+        // Intentionally NOT calling notify_change here to prevent infinite broadcast loops
+        Ok(())
+    }
+
+    fn notify_change(&self) {
+        if let Ok(guard) = self.sync_tx.read() {
+            if let Some(ref tx) = *guard {
+                let _ = tx.send(());
+            }
+        }
+    }
+
+    fn save_to_disk(&self, doc: &mut AutoCommit) -> Result<(), String> {
         if let Some(ref path) = self.file_path {
             let data = doc.save();
             std::fs::write(path, data).map_err(|e| e.to_string())?;
         }
+        Ok(())
+    }
+
+    fn save_local_change(&self, doc: &mut AutoCommit) -> Result<(), String> {
+        self.save_to_disk(doc)?;
+        self.notify_change();
         Ok(())
     }
 
@@ -115,7 +153,7 @@ impl TodoRepository for AutomergeTodoRepo {
         doc.put(&item_obj, "status", Self::status_to_str(status))
             .map_err(|e| e.to_string())?;
 
-        self.save_internal(&mut doc)?;
+        self.save_local_change(&mut doc)?;
 
         Ok(TodoItem { id, text, status })
     }
@@ -128,7 +166,7 @@ impl TodoRepository for AutomergeTodoRepo {
         {
             doc.put(&item_obj, "status", Self::status_to_str(status))
                 .map_err(|e| e.to_string())?;
-            self.save_internal(&mut doc)?;
+            self.save_local_change(&mut doc)?;
             Ok(())
         } else {
             Err(format!("Todo item with id {} not found", id))
