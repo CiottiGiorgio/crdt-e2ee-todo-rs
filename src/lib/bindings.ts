@@ -4,7 +4,6 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 
 /** Commands */
 export const commands = {
-	greet: (name: string) => __TAURI_INVOKE<string>("greet", { name }),
 	getTodos: () => typedError<TodoItem[], string>(__TAURI_INVOKE("get_todos")),
 	addTodo: (text: string) => typedError<TodoItem, string>(__TAURI_INVOKE("add_todo", { text })),
 	updateTodoStatus: (id: number, status: TodoStatus) => typedError<null, string>(__TAURI_INVOKE("update_todo_status", { id, status })),

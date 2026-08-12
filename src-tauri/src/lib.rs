@@ -16,12 +16,6 @@ pub struct AppState {
 
 #[tauri::command]
 #[specta::specta]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
-
-#[tauri::command]
-#[specta::specta]
 async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, String> {
     state.todo_repo.get_all().await
 }
@@ -50,7 +44,6 @@ async fn delete_todo(id: i32, state: State<'_, AppState>) -> Result<(), String> 
 
 fn get_specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new().commands(collect_commands![
-        greet,
         get_todos,
         add_todo,
         update_todo_status,
