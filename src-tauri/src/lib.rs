@@ -1,14 +1,17 @@
 mod constants;
 mod models;
+mod repository;
 
-use models::TodoItem;
+use models::{TodoItem, TodoStatus};
+use repository::sqlite::SqliteTodoRepo;
+use repository::TodoRepository;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::SqlitePool;
-use tauri::Manager;
+use std::sync::Arc;
+use tauri::{Manager, State};
 use tauri_specta::{collect_commands, Builder};
 
-pub struct DbState {
-    pub pool: SqlitePool,
+pub struct AppState {
+    pub todo_repo: Arc<dyn TodoRepository>,
 }
 
 #[tauri::command]
@@ -19,31 +22,40 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 #[specta::specta]
-fn get_todos() -> Vec<TodoItem> {
-    vec![
-        TodoItem {
-            id: 1,
-            text: "Read a book".into(),
-            completed: false,
-            in_working_set: true,
-        },
-        TodoItem {
-            id: 2,
-            text: "Buy groceries".into(),
-            completed: false,
-            in_working_set: false,
-        },
-        TodoItem {
-            id: 3,
-            text: "Clean the room".into(),
-            completed: true,
-            in_working_set: false,
-        },
-    ]
+async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, String> {
+    state.todo_repo.get_all().await
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoItem, String> {
+    state.todo_repo.add(text).await
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn update_todo_status(
+    id: i32,
+    status: TodoStatus,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.todo_repo.update_status(id, status).await
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn delete_todo(id: i32, state: State<'_, AppState>) -> Result<(), String> {
+    state.todo_repo.delete(id).await
 }
 
 fn get_specta_builder() -> Builder<tauri::Wry> {
-    Builder::<tauri::Wry>::new().commands(collect_commands![greet, get_todos])
+    Builder::<tauri::Wry>::new().commands(collect_commands![
+        greet,
+        get_todos,
+        add_todo,
+        update_todo_status,
+        delete_todo
+    ])
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -84,7 +96,13 @@ pub fn run() {
                     .await
                     .expect("failed to connect to sqlite database");
 
-                app.manage(DbState { pool });
+                let repo = SqliteTodoRepo::new(pool)
+                    .await
+                    .expect("failed to initialize repository");
+
+                app.manage(AppState {
+                    todo_repo: Arc::new(repo),
+                });
             });
 
             Ok(())

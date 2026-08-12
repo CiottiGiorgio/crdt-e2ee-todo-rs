@@ -1,54 +1,64 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { commands, type TodoItem } from "$lib/bindings";
+  import { commands, type TodoItem, type TodoStatus } from "$lib/bindings";
 
   let todos = $state<TodoItem[]>([]);
 
-  onMount(async () => {
-    try {
-      todos = await commands.getTodos();
-    } catch (err) {
-      console.error("Failed to load todos from Rust core:", err);
+  async function loadTodos() {
+    const res = await commands.getTodos();
+    if (res.status === "ok") {
+      todos = res.data;
+    } else {
+      console.error("Failed to load todos:", res.error);
     }
+  }
+
+  onMount(() => {
+    loadTodos();
   });
 
   let isBacklogOpen = $state(false);
   let isCompletedOpen = $state(false);
 
-  let workingSetTodos = $derived(todos.filter((t) => !t.completed && t.inWorkingSet));
-  let backlogTodos = $derived(todos.filter((t) => !t.completed && !t.inWorkingSet));
-  let completedTodos = $derived(todos.filter((t) => t.completed));
+  let workingSetTodos = $derived(todos.filter((t) => t.status === "workingSet"));
+  let backlogTodos = $derived(todos.filter((t) => t.status === "backlog"));
+  let completedTodos = $derived(todos.filter((t) => t.status === "completed"));
 
   let newTodoText = $state("");
 
-  function addTodo(event: Event) {
+  async function addTodo(event: Event) {
     event.preventDefault();
-    if (!newTodoText.trim()) return;
-    todos.push({
-      id: Date.now(),
-      text: newTodoText.trim(),
-      completed: false,
-      inWorkingSet: false
-    });
-    newTodoText = "";
-  }
-
-  function toggleTodo(id: number) {
-    const todo = todos.find((t) => t.id === id);
-    if (todo) {
-      todo.completed = !todo.completed;
+    const text = newTodoText.trim();
+    if (!text) return;
+    const res = await commands.addTodo(text);
+    if (res.status === "ok") {
+      todos.push(res.data);
+      newTodoText = "";
+    } else {
+      console.error("Failed to add todo:", res.error);
     }
   }
 
-  function toggleWorkingSet(id: number) {
+  async function updateStatus(id: number, newStatus: TodoStatus) {
     const todo = todos.find((t) => t.id === id);
-    if (todo) {
-      todo.inWorkingSet = !todo.inWorkingSet;
+    if (!todo) return;
+    const oldStatus = todo.status;
+    todo.status = newStatus;
+    const res = await commands.updateTodoStatus(id, newStatus);
+    if (res.status !== "ok") {
+      todo.status = oldStatus;
+      console.error("Failed to update todo status:", res.error);
     }
   }
 
-  function deleteTodo(id: number) {
+  async function deleteTodo(id: number) {
+    const original = [...todos];
     todos = todos.filter((t) => t.id !== id);
+    const res = await commands.deleteTodo(id);
+    if (res.status !== "ok") {
+      todos = original;
+      console.error("Failed to delete todo:", res.error);
+    }
   }
 </script>
 
@@ -76,8 +86,8 @@
             <label>
               <input
                 type="checkbox"
-                checked={todo.completed}
-                onchange={() => toggleTodo(todo.id)}
+                checked={todo.status === "completed"}
+                onchange={() => updateStatus(todo.id, todo.status === "completed" ? "workingSet" : "completed")}
               />
               <span>{todo.text}</span>
             </label>
@@ -85,7 +95,7 @@
               <button
                 type="button"
                 class="action-btn"
-                onclick={() => toggleWorkingSet(todo.id)}
+                onclick={() => updateStatus(todo.id, "backlog")}
               >
                 - Remove
               </button>
@@ -136,8 +146,8 @@
               <label>
                 <input
                   type="checkbox"
-                  checked={todo.completed}
-                  onchange={() => toggleTodo(todo.id)}
+                  checked={todo.status === "completed"}
+                  onchange={() => updateStatus(todo.id, todo.status === "completed" ? "backlog" : "completed")}
                 />
                 <span>{todo.text}</span>
               </label>
@@ -145,7 +155,7 @@
                 <button
                   type="button"
                   class="action-btn"
-                  onclick={() => toggleWorkingSet(todo.id)}
+                  onclick={() => updateStatus(todo.id, "workingSet")}
                 >
                   + Working Set
                 </button>
@@ -197,8 +207,8 @@
               <label>
                 <input
                   type="checkbox"
-                  checked={todo.completed}
-                  onchange={() => toggleTodo(todo.id)}
+                  checked={todo.status === "completed"}
+                  onchange={() => updateStatus(todo.id, "workingSet")}
                 />
                 <span class="completed">{todo.text}</span>
               </label>
