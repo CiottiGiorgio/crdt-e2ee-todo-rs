@@ -1,16 +1,16 @@
 <script lang="ts">
-  interface TodoItem {
-    id: number;
-    text: string;
-    completed: boolean;
-    inWorkingSet: boolean;
-  }
+  import { onMount } from "svelte";
+  import { commands, type TodoItem } from "$lib/bindings";
 
-  let todos = $state<TodoItem[]>([
-    { id: 1, text: "Read a book", completed: false, inWorkingSet: true },
-    { id: 2, text: "Buy groceries", completed: false, inWorkingSet: false },
-    { id: 3, text: "Clean the room", completed: true, inWorkingSet: false }
-  ]);
+  let todos = $state<TodoItem[]>([]);
+
+  onMount(async () => {
+    try {
+      todos = await commands.getTodos();
+    } catch (err) {
+      console.error("Failed to load todos from Rust core:", err);
+    }
+  });
 
   let isBacklogOpen = $state(false);
   let isCompletedOpen = $state(false);
