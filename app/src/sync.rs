@@ -28,19 +28,12 @@ pub fn start_sync_worker(
                     println!("Connected to sync server!");
                     let (mut write, mut read) = ws_stream.split();
 
-                    // Send RequestSync on initial connection
-                    let req_sync = serde_json::to_string(&ClientMessage::RequestSync).unwrap();
-                    if let Err(e) = write.send(Message::Text(req_sync.into())).await {
-                        eprintln!("Failed to send RequestSync: {}", e);
-                        sleep(Duration::from_secs(3)).await;
-                        continue;
-                    }
-
                     let mut highest_seq_id: u64 = 0;
                     let mut debounce_timer: Option<Pin<Box<Sleep>>> = None;
 
                     // Periodic snapshot timer (e.g. every 5 minutes)
-                    let mut snapshot_interval = interval(Duration::from_secs(SNAPSHOT_INTERVAL_MINUTES * 60));
+                    let mut snapshot_interval =
+                        interval(Duration::from_secs(SNAPSHOT_INTERVAL_MINUTES * 60));
                     // Skip the immediate first tick on connection
                     snapshot_interval.tick().await;
 
@@ -49,14 +42,16 @@ pub fn start_sync_worker(
                             // Periodic Snapshot Timer Triggered
                             _ = snapshot_interval.tick() => {
                                 let local_bytes = repo.get_doc_bytes();
-                                if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
-                                    let client_msg = ClientMessage::Snapshot {
-                                        covers_seq_id: highest_seq_id,
-                                        payload: encrypted_payload,
-                                    };
-                                    if let Ok(json) = serde_json::to_string(&client_msg) {
-                                        if write.send(Message::Text(json.into())).await.is_ok() {
-                                            println!("Pushed periodic snapshot (covers seq_id: {}) to server!", highest_seq_id);
+                                if !local_bytes.is_empty() {
+                                    if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
+                                        let client_msg = ClientMessage::Snapshot {
+                                            covers_seq_id: highest_seq_id,
+                                            payload: encrypted_payload,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&client_msg) {
+                                            if write.send(Message::Text(json.into())).await.is_ok() {
+                                                println!("Pushed periodic snapshot (covers seq_id: {}) to server!", highest_seq_id);
+                                            }
                                         }
                                     }
                                 }
@@ -71,17 +66,19 @@ pub fn start_sync_worker(
                             } => {
                                 debounce_timer = None;
                                 let local_bytes = repo.get_doc_bytes();
-                                if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
-                                    let client_msg = ClientMessage::Delta {
-                                        seq_id: None,
-                                        payload: encrypted_payload,
-                                    };
-                                    if let Ok(json) = serde_json::to_string(&client_msg) {
-                                        if write.send(Message::Text(json.into())).await.is_err() {
-                                            eprintln!("Failed to push debounced update to server");
-                                            break;
-                                        } else {
-                                            println!("Pushed debounced local delta update to server!");
+                                if !local_bytes.is_empty() {
+                                    if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
+                                        let client_msg = ClientMessage::Delta {
+                                            seq_id: None,
+                                            payload: encrypted_payload,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&client_msg) {
+                                            if write.send(Message::Text(json.into())).await.is_err() {
+                                                eprintln!("Failed to push debounced update to server");
+                                                break;
+                                            } else {
+                                                println!("Pushed debounced local delta update to server!");
+                                            }
                                         }
                                     }
                                 }
@@ -93,6 +90,34 @@ pub fn start_sync_worker(
                                     Ok(Message::Text(text)) => {
                                         if let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) {
                                             match server_msg {
+                                                ServerMessage::Welcome { highest_seq_id: server_highest } => {
+                                                    println!("Received Welcome from server (server_highest_seq_id: {})", server_highest);
+                                                    if server_highest == 0 {
+                                                        // Server has no data (Server Amnesia). If we have local data, rehydrate the server!
+                                                        let local_bytes = repo.get_doc_bytes();
+                                                        if !local_bytes.is_empty() {
+                                                            if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
+                                                                let client_msg = ClientMessage::Snapshot {
+                                                                    covers_seq_id: 0,
+                                                                    payload: encrypted_payload,
+                                                                };
+                                                                if let Ok(json) = serde_json::to_string(&client_msg) {
+                                                                    if write.send(Message::Text(json.into())).await.is_ok() {
+                                                                        println!("Client rehydrated empty server with local Snapshot!");
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        // Server has data. Request sync starting from our highest known seq_id
+                                                        let req_sync = ClientMessage::RequestSync {
+                                                            from_seq_id: highest_seq_id,
+                                                        };
+                                                        if let Ok(json) = serde_json::to_string(&req_sync) {
+                                                            let _ = write.send(Message::Text(json.into())).await;
+                                                        }
+                                                    }
+                                                }
                                                 ServerMessage::Snapshot { seq_id, payload } | ServerMessage::Delta { seq_id, payload } => {
                                                     highest_seq_id = highest_seq_id.max(seq_id);
                                                     if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {

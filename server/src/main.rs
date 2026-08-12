@@ -78,6 +78,18 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // A channel for sending messages directly to THIS client only (e.g. initial sync)
     let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
 
+    // Send Welcome message immediately with current highest seq_id
+    let highest_seq_id = {
+        let store = state.store.lock().unwrap();
+        store
+            .deltas
+            .last()
+            .map(|(seq, _)| *seq)
+            .or_else(|| store.snapshot.as_ref().map(|(seq, _)| *seq))
+            .unwrap_or(0)
+    };
+    let _ = direct_tx.send(ServerMessage::Welcome { highest_seq_id });
+
     // Spawn task to forward messages to the WebSocket
     let send_task = tokio::spawn(async move {
         loop {
@@ -111,18 +123,31 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         if let Message::Text(text) = msg {
             if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                 match client_msg {
-                    ClientMessage::RequestSync => {
+                    ClientMessage::RequestSync { from_seq_id } => {
                         let (snapshot, deltas_to_send) = {
                             let store = state.store.lock().unwrap();
-                            let snap = store.snapshot.clone();
-                            let min_seq = snap.as_ref().map(|(seq, _)| *seq).unwrap_or(0);
-                            let deltas: Vec<(u64, EncryptedPayload)> = store
-                                .deltas
-                                .iter()
-                                .filter(|(seq, _)| *seq > min_seq)
-                                .cloned()
-                                .collect();
-                            (snap, deltas)
+                            let snap_seq = store.snapshot.as_ref().map(|(seq, _)| *seq).unwrap_or(0);
+
+                            if from_seq_id < snap_seq {
+                                // Client is missing data older than server's current snapshot. Send snapshot + deltas after snapshot.
+                                let snap = store.snapshot.clone();
+                                let deltas: Vec<(u64, EncryptedPayload)> = store
+                                    .deltas
+                                    .iter()
+                                    .filter(|(seq, _)| *seq > snap_seq)
+                                    .cloned()
+                                    .collect();
+                                (snap, deltas)
+                            } else {
+                                // Client has the snapshot state or newer. Only send deltas after from_seq_id.
+                                let deltas: Vec<(u64, EncryptedPayload)> = store
+                                    .deltas
+                                    .iter()
+                                    .filter(|(seq, _)| *seq > from_seq_id)
+                                    .cloned()
+                                    .collect();
+                                (None, deltas)
+                            }
                         };
 
                         // Send historical snapshot and deltas DIRECTLY to the requesting client
@@ -164,6 +189,8 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 store.snapshot = Some((covers_seq_id, payload.clone()));
                                 // Prune deltas covered by this snapshot
                                 store.deltas.retain(|(seq, _)| *seq > covers_seq_id);
+                                // Ensure next_seq_id is ahead of the newly accepted snapshot sequence ID
+                                store.next_seq_id = store.next_seq_id.max(covers_seq_id + 1);
                                 true
                             } else {
                                 false

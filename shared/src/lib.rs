@@ -19,13 +19,19 @@ pub enum ClientMessage {
         covers_seq_id: u64,
         payload: EncryptedPayload,
     },
-    /// Request sync state from server
-    RequestSync,
+    /// Request sync state from server starting after from_seq_id
+    RequestSync {
+        from_seq_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
+    /// Server handshake message advertising its highest known sequence ID
+    Welcome {
+        highest_seq_id: u64,
+    },
     /// Server sending a snapshot to the client
     Snapshot {
         seq_id: u64,
