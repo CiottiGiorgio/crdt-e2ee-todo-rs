@@ -15,6 +15,8 @@ use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
+// FIXME: We don't want sequential numbers for the connected clients as this potentially leaks
+//  how many clients are connected at a given time.
 static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
@@ -24,90 +26,17 @@ struct AppState {
 }
 
 struct SyncStore {
-    snapshot: Option<(u64, EncryptedPayload)>,
-    deltas: Vec<(u64, EncryptedPayload)>,
-    next_seq_id: u64,
     pool: SqlitePool,
 }
 
 impl SyncStore {
     async fn new(pool: SqlitePool) -> Self {
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS snapshot (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                seq_id INTEGER NOT NULL,
-                ciphertext BLOB NOT NULL,
-                nonce BLOB NOT NULL
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("Failed to create snapshot table");
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS deltas (
-                seq_id INTEGER PRIMARY KEY,
-                ciphertext BLOB NOT NULL,
-                nonce BLOB NOT NULL
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("Failed to create deltas table");
-
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value INTEGER NOT NULL
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("Failed to create metadata table");
-
-        // Load next_seq_id
-        let next_seq_id: u64 = sqlx::query_scalar::<_, i64>("SELECT value FROM metadata WHERE key = 'next_seq_id'")
-            .fetch_optional(&pool)
+        sqlx::migrate!("./migrations")
+            .run(&pool)
             .await
-            .unwrap_or(None)
-            .map(|v| v as u64)
-            .unwrap_or(1);
+            .expect("Failed to run database migrations");
 
-        // Load snapshot
-        let snapshot_row = sqlx::query("SELECT seq_id, ciphertext, nonce FROM snapshot WHERE id = 1")
-            .fetch_optional(&pool)
-            .await
-            .unwrap_or(None);
-
-        let snapshot = snapshot_row.map(|row| {
-            let seq_id: i64 = row.get(0);
-            let ciphertext: Vec<u8> = row.get(1);
-            let nonce: Vec<u8> = row.get(2);
-            (seq_id as u64, EncryptedPayload { ciphertext, nonce })
-        });
-
-        // Load deltas
-        let delta_rows = sqlx::query("SELECT seq_id, ciphertext, nonce FROM deltas ORDER BY seq_id ASC")
-            .fetch_all(&pool)
-            .await
-            .unwrap_or_default();
-
-        let deltas = delta_rows
-            .into_iter()
-            .map(|row| {
-                let seq_id: i64 = row.get(0);
-                let ciphertext: Vec<u8> = row.get(1);
-                let nonce: Vec<u8> = row.get(2);
-                (seq_id as u64, EncryptedPayload { ciphertext, nonce })
-            })
-            .collect();
-
-        Self {
-            snapshot,
-            deltas,
-            next_seq_id,
-            pool,
-        }
+        Self { pool }
     }
 }
 
@@ -137,7 +66,7 @@ async fn main() {
         .await
         .expect("Failed to bind server port 3000");
 
-    info!("Dumb Relay Server (powered by SQLx) listening on ws://0.0.0.0:3000/ws");
+    info!("Dumb Relay Server (powered by SQLx Migrations) listening on ws://0.0.0.0:3000/ws");
     axum::serve(listener, app).await.unwrap();
 }
 
@@ -158,14 +87,13 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // A channel for sending messages directly to THIS client only (e.g. initial sync)
     let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
 
-    // Send Welcome message immediately with current highest seq_id
+    // Send Welcome message immediately with current highest seq_id straight from SQLite
     let highest_seq_id = {
         let store = state.store.lock().await;
-        store
-            .deltas
-            .last()
-            .map(|(seq, _)| *seq)
-            .or_else(|| store.snapshot.as_ref().map(|(seq, _)| *seq))
+        sqlx::query_scalar::<_, i64>("SELECT highest_seq_id FROM server_state")
+            .fetch_one(&store.pool)
+            .await
+            .map(|v| v as u64)
             .unwrap_or(0)
     };
     let _ = direct_tx.send(ServerMessage::Welcome { highest_seq_id });
@@ -204,65 +132,104 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                 match client_msg {
                     ClientMessage::RequestSync { from_seq_id } => {
-                        let (snapshot, deltas_to_send) = {
-                            let store = state.store.lock().await;
-                            let snap_seq = store.snapshot.as_ref().map(|(seq, _)| *seq).unwrap_or(0);
+                        let store = state.store.lock().await;
 
-                            if from_seq_id < snap_seq {
-                                // Client is missing data older than server's current snapshot. Send snapshot + deltas after snapshot.
-                                let snap = store.snapshot.clone();
-                                let deltas: Vec<(u64, EncryptedPayload)> = store
-                                    .deltas
-                                    .iter()
-                                    .filter(|(seq, _)| *seq > snap_seq)
-                                    .cloned()
-                                    .collect();
-                                (snap, deltas)
-                            } else {
-                                // Client has the snapshot state or newer. Only send deltas after from_seq_id.
-                                let deltas: Vec<(u64, EncryptedPayload)> = store
-                                    .deltas
-                                    .iter()
-                                    .filter(|(seq, _)| *seq > from_seq_id)
-                                    .cloned()
-                                    .collect();
-                                (None, deltas)
+                        // Query current snapshot from SQLite
+                        let snapshot_row =
+                            sqlx::query("SELECT seq_id, ciphertext, nonce FROM snapshot WHERE id = 1")
+                                .fetch_optional(&store.pool)
+                                .await
+                                .unwrap_or(None);
+
+                        let snap_seq = snapshot_row
+                            .as_ref()
+                            .map(|r| r.get::<i64, _>(0) as u64)
+                            .unwrap_or(0);
+
+                        if from_seq_id < snap_seq {
+                            // Send snapshot first
+                            if let Some(row) = snapshot_row {
+                                let seq_id: i64 = row.get(0);
+                                let ciphertext: Vec<u8> = row.get(1);
+                                let nonce_vec: Vec<u8> = row.get(2);
+                                if let Ok(nonce) = nonce_vec.try_into() {
+                                    let payload = EncryptedPayload { ciphertext, nonce };
+                                    let _ = direct_tx.send(ServerMessage::Snapshot {
+                                        seq_id: seq_id as u64,
+                                        payload,
+                                    });
+                                }
                             }
-                        };
 
-                        // Send historical snapshot and deltas DIRECTLY to the requesting client
-                        if let Some((seq_id, payload)) = snapshot {
-                            let _ = direct_tx.send(ServerMessage::Snapshot { seq_id, payload });
-                        }
-                        for (seq_id, payload) in deltas_to_send {
-                            let _ = direct_tx.send(ServerMessage::Delta { seq_id, payload });
+                            // Send deltas after snap_seq
+                            let delta_rows = sqlx::query(
+                                "SELECT seq_id, ciphertext, nonce FROM deltas WHERE seq_id > ? ORDER BY seq_id ASC",
+                            )
+                            .bind(snap_seq as i64)
+                            .fetch_all(&store.pool)
+                            .await
+                            .unwrap_or_default();
+
+                            for row in delta_rows {
+                                let seq_id: i64 = row.get(0);
+                                let ciphertext: Vec<u8> = row.get(1);
+                                let nonce_vec: Vec<u8> = row.get(2);
+                                if let Ok(nonce) = nonce_vec.try_into() {
+                                    let payload = EncryptedPayload { ciphertext, nonce };
+                                    let _ = direct_tx.send(ServerMessage::Delta {
+                                        seq_id: seq_id as u64,
+                                        payload,
+                                    });
+                                }
+                            }
+                        } else {
+                            // Send deltas after from_seq_id
+                            let delta_rows = sqlx::query(
+                                "SELECT seq_id, ciphertext, nonce FROM deltas WHERE seq_id > ? ORDER BY seq_id ASC",
+                            )
+                            .bind(from_seq_id as i64)
+                            .fetch_all(&store.pool)
+                            .await
+                            .unwrap_or_default();
+
+                            for row in delta_rows {
+                                let seq_id: i64 = row.get(0);
+                                let ciphertext: Vec<u8> = row.get(1);
+                                let nonce_vec: Vec<u8> = row.get(2);
+                                if let Ok(nonce) = nonce_vec.try_into() {
+                                    let payload = EncryptedPayload { ciphertext, nonce };
+                                    let _ = direct_tx.send(ServerMessage::Delta {
+                                        seq_id: seq_id as u64,
+                                        payload,
+                                    });
+                                }
+                            }
                         }
                     }
                     ClientMessage::Delta { payload, .. } => {
                         let seq_id = {
-                            let mut store = state.store.lock().await;
-                            let seq = store.next_seq_id;
+                            let store = state.store.lock().await;
 
-                            // Save to SQLite via sqlx
+                            // Query highest_seq_id from SQLite, increment by 1
+                            let highest_seq: u64 =
+                                sqlx::query_scalar::<_, i64>("SELECT highest_seq_id FROM server_state")
+                                    .fetch_one(&store.pool)
+                                    .await
+                                    .map(|v| v as u64)
+                                    .unwrap_or(0);
+                            let seq = highest_seq + 1;
+
+                            // Save to SQLite
                             let mut tx = store.pool.begin().await.unwrap();
                             sqlx::query("INSERT INTO deltas (seq_id, ciphertext, nonce) VALUES (?, ?, ?)")
                                 .bind(seq as i64)
                                 .bind(&payload.ciphertext)
-                                .bind(&payload.nonce)
-                                .execute(&mut *tx)
-                                .await
-                                .unwrap();
-
-                            sqlx::query("INSERT OR REPLACE INTO metadata (key, value) VALUES ('next_seq_id', ?)")
-                                .bind((seq + 1) as i64)
+                                .bind(&payload.nonce[..])
                                 .execute(&mut *tx)
                                 .await
                                 .unwrap();
 
                             tx.commit().await.unwrap();
-
-                            store.next_seq_id += 1;
-                            store.deltas.push((seq, payload.clone()));
                             seq
                         };
 
@@ -280,19 +247,21 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         payload,
                     } => {
                         let updated = {
-                            let mut store = state.store.lock().await;
-                            let current_snap_seq =
-                                store.snapshot.as_ref().map(|(seq, _)| *seq).unwrap_or(0);
+                            let store = state.store.lock().await;
+                            let current_snap_seq: u64 =
+                                sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq_id), 0) FROM snapshot")
+                                    .fetch_one(&store.pool)
+                                    .await
+                                    .map(|v| v as u64)
+                                    .unwrap_or(0);
 
                             if covers_seq_id >= current_snap_seq {
-                                let new_next_seq_id = store.next_seq_id.max(covers_seq_id + 1);
-
-                                // Save to SQLite via sqlx
+                                // Save to SQLite
                                 let mut tx = store.pool.begin().await.unwrap();
                                 sqlx::query("INSERT OR REPLACE INTO snapshot (id, seq_id, ciphertext, nonce) VALUES (1, ?, ?, ?)")
                                     .bind(covers_seq_id as i64)
                                     .bind(&payload.ciphertext)
-                                    .bind(&payload.nonce)
+                                    .bind(&payload.nonce[..])
                                     .execute(&mut *tx)
                                     .await
                                     .unwrap();
@@ -303,17 +272,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                     .await
                                     .unwrap();
 
-                                sqlx::query("INSERT OR REPLACE INTO metadata (key, value) VALUES ('next_seq_id', ?)")
-                                    .bind(new_next_seq_id as i64)
-                                    .execute(&mut *tx)
-                                    .await
-                                    .unwrap();
-
                                 tx.commit().await.unwrap();
-
-                                store.snapshot = Some((covers_seq_id, payload.clone()));
-                                store.deltas.retain(|(seq, _)| *seq > covers_seq_id);
-                                store.next_seq_id = new_next_seq_id;
                                 true
                             } else {
                                 false

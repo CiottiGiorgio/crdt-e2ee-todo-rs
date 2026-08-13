@@ -1,20 +1,20 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use rand::RngCore;
-use shared::EncryptedPayload;
+use shared::{EncryptedPayload, IV_SIZE, KEY_SIZE};
 
 pub struct CryptoEngine {
     cipher: Aes256Gcm,
 }
 
 impl CryptoEngine {
-    pub fn new(key: &[u8; 32]) -> Self {
+    pub fn new(key: &[u8; KEY_SIZE]) -> Self {
         let cipher = Aes256Gcm::new(key.into());
         Self { cipher }
     }
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<EncryptedPayload, String> {
-        let mut nonce_bytes = [0u8; 12];
+        let mut nonce_bytes = [0u8; IV_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -25,7 +25,7 @@ impl CryptoEngine {
 
         Ok(EncryptedPayload {
             ciphertext,
-            nonce: nonce_bytes.to_vec(),
+            nonce: nonce_bytes,
         })
     }
 
@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let key = [42u8; 32];
+        let key = [42u8; KEY_SIZE];
         let engine = CryptoEngine::new(&key);
 
         let plaintext = b"Hello Automerge E2EE!";
