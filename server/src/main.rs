@@ -5,12 +5,15 @@ use axum::{
     Router,
 };
 use futures::{SinkExt, StreamExt};
-use shared::{ClientMessage, EncryptedPayload, ServerMessage};
-use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use shared::{ClientMessage, ServerMessage};
+use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
+
+mod sync_store;
+use sync_store::SyncStore;
 
 // FIXME: We don't want sequential numbers for the connected clients as this potentially leaks
 //  how many clients are connected at a given time.
@@ -20,22 +23,6 @@ static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 struct AppState {
     store: SyncStore,
     tx: broadcast::Sender<(usize, ServerMessage)>,
-}
-
-#[derive(Clone)]
-struct SyncStore {
-    pool: SqlitePool,
-}
-
-impl SyncStore {
-    async fn new(pool: SqlitePool) -> Self {
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("Failed to run database migrations");
-
-        Self { pool }
-    }
 }
 
 #[tokio::main]
@@ -86,11 +73,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
 
     // Send Welcome message immediately with current highest seq_id straight from SQLite
-    let highest_seq_id = sqlx::query_scalar::<_, i64>("SELECT highest_seq_id FROM server_state")
-        .fetch_one(&state.store.pool)
-        .await
-        .map(|v| v as u64)
-        .unwrap_or(0);
+    let highest_seq_id = state.store.get_highest_seq_id().await.unwrap_or(0);
     let _ = direct_tx.send(ServerMessage::Welcome { highest_seq_id });
 
     // Spawn task to forward messages to the WebSocket
@@ -127,165 +110,71 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                 match client_msg {
                     ClientMessage::RequestSync { from_seq_id } => {
-                        // Query current snapshot from SQLite
-                        let snapshot_row =
-                            sqlx::query("SELECT seq_id, ciphertext, nonce FROM snapshot WHERE id = 1")
-                                .fetch_optional(&state.store.pool)
-                                .await
-                                .unwrap_or(None);
-
-                        let snap_seq = snapshot_row
-                            .as_ref()
-                            .map(|r| r.get::<i64, _>(0) as u64)
-                            .unwrap_or(0);
+                        let snapshot = state.store.get_snapshot().await.ok().flatten();
+                        let snap_seq = snapshot.as_ref().map(|(s, _)| *s).unwrap_or(0);
 
                         if from_seq_id < snap_seq {
                             // Send snapshot first
-                            if let Some(row) = snapshot_row {
-                                let seq_id: i64 = row.get(0);
-                                let ciphertext: Vec<u8> = row.get(1);
-                                let nonce_vec: Vec<u8> = row.get(2);
-                                if let Ok(nonce) = nonce_vec.try_into() {
-                                    let payload = EncryptedPayload { ciphertext, nonce };
-                                    let _ = direct_tx.send(ServerMessage::Snapshot {
-                                        seq_id: seq_id as u64,
-                                        payload,
-                                    });
-                                }
+                            if let Some((seq_id, payload)) = snapshot {
+                                let _ = direct_tx.send(ServerMessage::Snapshot { seq_id, payload });
                             }
 
                             // Send deltas after snap_seq
-                            let delta_rows = sqlx::query(
-                                "SELECT seq_id, ciphertext, nonce FROM deltas WHERE seq_id > ? ORDER BY seq_id ASC",
-                            )
-                            .bind(snap_seq as i64)
-                            .fetch_all(&state.store.pool)
-                            .await
-                            .unwrap_or_default();
-
-                            for row in delta_rows {
-                                let seq_id: i64 = row.get(0);
-                                let ciphertext: Vec<u8> = row.get(1);
-                                let nonce_vec: Vec<u8> = row.get(2);
-                                if let Ok(nonce) = nonce_vec.try_into() {
-                                    let payload = EncryptedPayload { ciphertext, nonce };
-                                    let _ = direct_tx.send(ServerMessage::Delta {
-                                        seq_id: seq_id as u64,
-                                        payload,
-                                    });
+                            if let Ok(deltas) = state.store.get_deltas_after(snap_seq).await {
+                                for (seq_id, payload) in deltas {
+                                    let _ = direct_tx.send(ServerMessage::Delta { seq_id, payload });
                                 }
                             }
                         } else {
                             // Send deltas after from_seq_id
-                            let delta_rows = sqlx::query(
-                                "SELECT seq_id, ciphertext, nonce FROM deltas WHERE seq_id > ? ORDER BY seq_id ASC",
-                            )
-                            .bind(from_seq_id as i64)
-                            .fetch_all(&state.store.pool)
-                            .await
-                            .unwrap_or_default();
-
-                            for row in delta_rows {
-                                let seq_id: i64 = row.get(0);
-                                let ciphertext: Vec<u8> = row.get(1);
-                                let nonce_vec: Vec<u8> = row.get(2);
-                                if let Ok(nonce) = nonce_vec.try_into() {
-                                    let payload = EncryptedPayload { ciphertext, nonce };
-                                    let _ = direct_tx.send(ServerMessage::Delta {
-                                        seq_id: seq_id as u64,
-                                        payload,
-                                    });
+                            if let Ok(deltas) = state.store.get_deltas_after(from_seq_id).await {
+                                for (seq_id, payload) in deltas {
+                                    let _ = direct_tx.send(ServerMessage::Delta { seq_id, payload });
                                 }
                             }
                         }
                     }
                     ClientMessage::Delta { payload, .. } => {
-                        let seq_id = {
-                            // Query highest_seq_id from SQLite, increment by 1
-                            let highest_seq: u64 =
-                                sqlx::query_scalar::<_, i64>("SELECT highest_seq_id FROM server_state")
-                                    .fetch_one(&state.store.pool)
-                                    .await
-                                    .map(|v| v as u64)
-                                    .unwrap_or(0);
-                            let seq = highest_seq + 1;
-
-                            // Save to SQLite
-                            let mut tx = state.store.pool.begin().await.unwrap();
-                            sqlx::query("INSERT INTO deltas (seq_id, ciphertext, nonce) VALUES (?, ?, ?)")
-                                .bind(seq as i64)
-                                .bind(&payload.ciphertext)
-                                .bind(&payload.nonce[..])
-                                .execute(&mut *tx)
-                                .await
-                                .unwrap();
-
-                            tx.commit().await.unwrap();
-                            seq
-                        };
-
-                        info!(
-                            "Received Delta from Client {} -> Assigned SeqId: {}",
-                            my_client_id, seq_id
-                        );
-                        // Broadcast to everyone else
-                        let _ = state
-                            .tx
-                            .send((my_client_id, ServerMessage::Delta { seq_id, payload }));
+                        if let Ok(seq_id) = state.store.save_delta(&payload).await {
+                            info!(
+                                "Received Delta from Client {} -> Assigned SeqId: {}",
+                                my_client_id, seq_id
+                            );
+                            // Broadcast to everyone else
+                            let _ = state
+                                .tx
+                                .send((my_client_id, ServerMessage::Delta { seq_id, payload }));
+                        } else {
+                            error!("Failed to save Delta from client {}", my_client_id);
+                        }
                     }
                     ClientMessage::Snapshot {
                         covers_seq_id,
                         payload,
                     } => {
-                        let updated = {
-                            let current_snap_seq: u64 =
-                                sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq_id), 0) FROM snapshot")
-                                    .fetch_one(&state.store.pool)
-                                    .await
-                                    .map(|v| v as u64)
-                                    .unwrap_or(0);
-
-                            if covers_seq_id >= current_snap_seq {
-                                // Save to SQLite
-                                let mut tx = state.store.pool.begin().await.unwrap();
-                                sqlx::query("INSERT OR REPLACE INTO snapshot (id, seq_id, ciphertext, nonce) VALUES (1, ?, ?, ?)")
-                                    .bind(covers_seq_id as i64)
-                                    .bind(&payload.ciphertext)
-                                    .bind(&payload.nonce[..])
-                                    .execute(&mut *tx)
-                                    .await
-                                    .unwrap();
-
-                                sqlx::query("DELETE FROM deltas WHERE seq_id <= ?")
-                                    .bind(covers_seq_id as i64)
-                                    .execute(&mut *tx)
-                                    .await
-                                    .unwrap();
-
-                                tx.commit().await.unwrap();
-                                true
-                            } else {
-                                false
+                        match state.store.save_snapshot(covers_seq_id, &payload).await {
+                            Ok(true) => {
+                                info!(
+                                    "Accepted Snapshot from Client {} covering up to SeqId: {}",
+                                    my_client_id, covers_seq_id
+                                );
+                                let _ = state.tx.send((
+                                    my_client_id,
+                                    ServerMessage::Snapshot {
+                                        seq_id: covers_seq_id,
+                                        payload,
+                                    },
+                                ));
                             }
-                        };
-
-                        if updated {
-                            info!(
-                                "Accepted Snapshot from Client {} covering up to SeqId: {}",
-                                my_client_id, covers_seq_id
-                            );
-                            let _ = state.tx.send((
-                                my_client_id,
-                                ServerMessage::Snapshot {
-                                    seq_id: covers_seq_id,
-                                    payload,
-                                },
-                            ));
-                        } else {
-                            info!(
-                                "Rejected stale Snapshot from Client {} (covers {}, current is >=)",
-                                my_client_id, covers_seq_id
-                            );
+                            Ok(false) => {
+                                info!(
+                                    "Rejected stale Snapshot from Client {} (covers {}, current is >=)",
+                                    my_client_id, covers_seq_id
+                                );
+                            }
+                            Err(e) => {
+                                error!("Failed to save Snapshot from client {}: {}", my_client_id, e);
+                            }
                         }
                     }
                 }
