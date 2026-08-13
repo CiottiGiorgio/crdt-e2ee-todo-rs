@@ -122,14 +122,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             // Send deltas after snap_seq
                             if let Ok(deltas) = state.store.get_deltas_after(snap_seq).await {
                                 for (seq_id, payload) in deltas {
-                                    let _ = direct_tx.send(ServerMessage::Delta { seq_id, payload });
+                                    let _ =
+                                        direct_tx.send(ServerMessage::Delta { seq_id, payload });
                                 }
                             }
                         } else {
                             // Send deltas after from_seq_id
                             if let Ok(deltas) = state.store.get_deltas_after(from_seq_id).await {
                                 for (seq_id, payload) in deltas {
-                                    let _ = direct_tx.send(ServerMessage::Delta { seq_id, payload });
+                                    let _ =
+                                        direct_tx.send(ServerMessage::Delta { seq_id, payload });
                                 }
                             }
                         }
@@ -151,32 +153,33 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     ClientMessage::Snapshot {
                         covers_seq_id,
                         payload,
-                    } => {
-                        match state.store.save_snapshot(covers_seq_id, &payload).await {
-                            Ok(true) => {
-                                info!(
-                                    "Accepted Snapshot from Client {} covering up to SeqId: {}",
-                                    my_client_id, covers_seq_id
-                                );
-                                let _ = state.tx.send((
-                                    my_client_id,
-                                    ServerMessage::Snapshot {
-                                        seq_id: covers_seq_id,
-                                        payload,
-                                    },
-                                ));
-                            }
-                            Ok(false) => {
-                                info!(
-                                    "Rejected stale Snapshot from Client {} (covers {}, current is >=)",
-                                    my_client_id, covers_seq_id
-                                );
-                            }
-                            Err(e) => {
-                                error!("Failed to save Snapshot from client {}: {}", my_client_id, e);
-                            }
+                    } => match state.store.save_snapshot(covers_seq_id, &payload).await {
+                        Ok(true) => {
+                            info!(
+                                "Accepted Snapshot from Client {} covering up to SeqId: {}",
+                                my_client_id, covers_seq_id
+                            );
+                            let _ = state.tx.send((
+                                my_client_id,
+                                ServerMessage::Snapshot {
+                                    seq_id: covers_seq_id,
+                                    payload,
+                                },
+                            ));
                         }
-                    }
+                        Ok(false) => {
+                            info!(
+                                "Rejected stale Snapshot from Client {} (covers {}, current is >=)",
+                                my_client_id, covers_seq_id
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to save Snapshot from client {}: {}",
+                                my_client_id, e
+                            );
+                        }
+                    },
                 }
             } else {
                 error!("Failed to parse ClientMessage from client {}", my_client_id);
@@ -187,4 +190,3 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("Client {} disconnected", my_client_id);
     send_task.abort();
 }
-

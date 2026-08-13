@@ -149,7 +149,10 @@ pub fn start_sync_worker(
                     }
                 }
                 Err(e) => {
-                    println!("Sync server not available ({}). Retrying in 5 seconds...", e);
+                    println!(
+                        "Sync server not available ({}). Retrying in 5 seconds...",
+                        e
+                    );
                 }
             }
 

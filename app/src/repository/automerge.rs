@@ -18,7 +18,8 @@ impl AutomergeTodoRepo {
         let doc = if let Some(ref path) = file_path {
             if path.exists() {
                 let data = std::fs::read(path).map_err(|e| e.to_string())?;
-                AutoCommit::load(&data).map_err(|e| format!("Failed to load automerge doc: {}", e))?
+                AutoCommit::load(&data)
+                    .map_err(|e| format!("Failed to load automerge doc: {}", e))?
             } else {
                 AutoCommit::new()
             }
@@ -126,11 +127,7 @@ impl TodoRepository for AutomergeTodoRepo {
 
                 if let Some(status) = Self::str_to_status(&status_str) {
                     if status != TodoStatus::Deleted {
-                        items.push(TodoItem {
-                            id,
-                            text,
-                            status,
-                        });
+                        items.push(TodoItem { id, text, status });
                     }
                 }
             }

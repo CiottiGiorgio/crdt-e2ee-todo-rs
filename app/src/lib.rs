@@ -52,16 +52,10 @@ pub fn run() {
             let master_key = [42u8; 32];
             let crypto = Arc::new(CryptoEngine::new(&master_key));
 
-            let sync_tx = sync::start_sync_worker(
-                repo.clone(),
-                crypto,
-                app.handle().clone(),
-            );
+            let sync_tx = sync::start_sync_worker(repo.clone(), crypto, app.handle().clone());
             repo.set_sync_notifier(sync_tx);
 
-            app.manage(AppState {
-                todo_repo: repo,
-            });
+            app.manage(AppState { todo_repo: repo });
 
             Ok(())
         })

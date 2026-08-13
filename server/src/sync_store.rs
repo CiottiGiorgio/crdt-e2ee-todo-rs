@@ -33,7 +33,10 @@ impl SyncStore {
             let ciphertext: Vec<u8> = row.get(1);
             let nonce_vec: Vec<u8> = row.get(2);
             if let Ok(nonce) = nonce_vec.try_into() {
-                return Ok(Some((seq_id as u64, EncryptedPayload { ciphertext, nonce })));
+                return Ok(Some((
+                    seq_id as u64,
+                    EncryptedPayload { ciphertext, nonce },
+                )));
             }
         }
         Ok(None)
