@@ -35,16 +35,15 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
-    /// Server handshake message advertising its highest known sequence ID
-    Welcome { highest_seq_id: u64 },
     /// Server sending a snapshot to the client
     Snapshot {
         seq_id: u64,
         payload: EncryptedPayload,
     },
-    /// Server broadcasting a delta to clients
-    Delta {
-        seq_id: u64,
-        payload: EncryptedPayload,
+    /// Server broadcasting a batch of deltas to clients
+    DeltaBatch {
+        deltas: Vec<(u64, EncryptedPayload)>,
     },
+    /// Server acknowledging a sequence ID position or delta upload
+    Ack { seq_id: u64 },
 }

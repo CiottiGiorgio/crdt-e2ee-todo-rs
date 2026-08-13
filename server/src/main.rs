@@ -72,9 +72,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // A channel for sending messages directly to THIS client only (e.g. initial sync)
     let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
 
-    // Send Welcome message immediately with current highest seq_id straight from SQLite
+    // Send Ack message immediately with current highest seq_id straight from SQLite
     let highest_seq_id = state.store.get_highest_seq_id().await.unwrap_or(0);
-    let _ = direct_tx.send(ServerMessage::Welcome { highest_seq_id });
+    let _ = direct_tx.send(ServerMessage::Ack { seq_id: highest_seq_id });
 
     // Spawn task to forward messages to the WebSocket
     let send_task = tokio::spawn(async move {
@@ -119,19 +119,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 let _ = direct_tx.send(ServerMessage::Snapshot { seq_id, payload });
                             }
 
-                            // Send deltas after snap_seq
+                            // Send deltas after snap_seq as a single batch
                             if let Ok(deltas) = state.store.get_deltas_after(snap_seq).await {
-                                for (seq_id, payload) in deltas {
-                                    let _ =
-                                        direct_tx.send(ServerMessage::Delta { seq_id, payload });
+                                if !deltas.is_empty() {
+                                    let _ = direct_tx.send(ServerMessage::DeltaBatch { deltas });
                                 }
                             }
                         } else {
-                            // Send deltas after from_seq_id
+                            // Send deltas after from_seq_id as a single batch
                             if let Ok(deltas) = state.store.get_deltas_after(from_seq_id).await {
-                                for (seq_id, payload) in deltas {
-                                    let _ =
-                                        direct_tx.send(ServerMessage::Delta { seq_id, payload });
+                                if !deltas.is_empty() {
+                                    let _ = direct_tx.send(ServerMessage::DeltaBatch { deltas });
                                 }
                             }
                         }
@@ -142,10 +140,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 "Received Delta from Client {} -> Assigned SeqId: {}",
                                 my_client_id, seq_id
                             );
-                            // Broadcast to everyone else
-                            let _ = state
-                                .tx
-                                .send((my_client_id, ServerMessage::Delta { seq_id, payload }));
+                            // Send Ack back to sender so it knows its assigned sequence ID
+                            let _ = direct_tx.send(ServerMessage::Ack { seq_id });
+
+                            // Broadcast batch to everyone else
+                            let _ = state.tx.send((
+                                my_client_id,
+                                ServerMessage::DeltaBatch {
+                                    deltas: vec![(seq_id, payload)],
+                                },
+                            ));
                         } else {
                             error!("Failed to save Delta from client {}", my_client_id);
                         }
