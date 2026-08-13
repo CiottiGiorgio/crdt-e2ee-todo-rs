@@ -7,11 +7,8 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use shared::{ClientMessage, EncryptedPayload, ServerMessage};
 use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
-};
-use tokio::sync::{broadcast, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
@@ -21,10 +18,11 @@ static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
 struct AppState {
-    store: Arc<Mutex<SyncStore>>,
+    store: SyncStore,
     tx: broadcast::Sender<(usize, ServerMessage)>,
 }
 
+#[derive(Clone)]
 struct SyncStore {
     pool: SqlitePool,
 }
@@ -53,7 +51,7 @@ async fn main() {
 
     let (tx, _rx) = broadcast::channel::<(usize, ServerMessage)>(100);
     let state = AppState {
-        store: Arc::new(Mutex::new(sync_store)),
+        store: sync_store,
         tx,
     };
 
@@ -88,14 +86,11 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
 
     // Send Welcome message immediately with current highest seq_id straight from SQLite
-    let highest_seq_id = {
-        let store = state.store.lock().await;
-        sqlx::query_scalar::<_, i64>("SELECT highest_seq_id FROM server_state")
-            .fetch_one(&store.pool)
-            .await
-            .map(|v| v as u64)
-            .unwrap_or(0)
-    };
+    let highest_seq_id = sqlx::query_scalar::<_, i64>("SELECT highest_seq_id FROM server_state")
+        .fetch_one(&state.store.pool)
+        .await
+        .map(|v| v as u64)
+        .unwrap_or(0);
     let _ = direct_tx.send(ServerMessage::Welcome { highest_seq_id });
 
     // Spawn task to forward messages to the WebSocket
@@ -132,12 +127,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                 match client_msg {
                     ClientMessage::RequestSync { from_seq_id } => {
-                        let store = state.store.lock().await;
-
                         // Query current snapshot from SQLite
                         let snapshot_row =
                             sqlx::query("SELECT seq_id, ciphertext, nonce FROM snapshot WHERE id = 1")
-                                .fetch_optional(&store.pool)
+                                .fetch_optional(&state.store.pool)
                                 .await
                                 .unwrap_or(None);
 
@@ -166,7 +159,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 "SELECT seq_id, ciphertext, nonce FROM deltas WHERE seq_id > ? ORDER BY seq_id ASC",
                             )
                             .bind(snap_seq as i64)
-                            .fetch_all(&store.pool)
+                            .fetch_all(&state.store.pool)
                             .await
                             .unwrap_or_default();
 
@@ -188,7 +181,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 "SELECT seq_id, ciphertext, nonce FROM deltas WHERE seq_id > ? ORDER BY seq_id ASC",
                             )
                             .bind(from_seq_id as i64)
-                            .fetch_all(&store.pool)
+                            .fetch_all(&state.store.pool)
                             .await
                             .unwrap_or_default();
 
@@ -208,19 +201,17 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     ClientMessage::Delta { payload, .. } => {
                         let seq_id = {
-                            let store = state.store.lock().await;
-
                             // Query highest_seq_id from SQLite, increment by 1
                             let highest_seq: u64 =
                                 sqlx::query_scalar::<_, i64>("SELECT highest_seq_id FROM server_state")
-                                    .fetch_one(&store.pool)
+                                    .fetch_one(&state.store.pool)
                                     .await
                                     .map(|v| v as u64)
                                     .unwrap_or(0);
                             let seq = highest_seq + 1;
 
                             // Save to SQLite
-                            let mut tx = store.pool.begin().await.unwrap();
+                            let mut tx = state.store.pool.begin().await.unwrap();
                             sqlx::query("INSERT INTO deltas (seq_id, ciphertext, nonce) VALUES (?, ?, ?)")
                                 .bind(seq as i64)
                                 .bind(&payload.ciphertext)
@@ -247,17 +238,16 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         payload,
                     } => {
                         let updated = {
-                            let store = state.store.lock().await;
                             let current_snap_seq: u64 =
                                 sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq_id), 0) FROM snapshot")
-                                    .fetch_one(&store.pool)
+                                    .fetch_one(&state.store.pool)
                                     .await
                                     .map(|v| v as u64)
                                     .unwrap_or(0);
 
                             if covers_seq_id >= current_snap_seq {
                                 // Save to SQLite
-                                let mut tx = store.pool.begin().await.unwrap();
+                                let mut tx = state.store.pool.begin().await.unwrap();
                                 sqlx::query("INSERT OR REPLACE INTO snapshot (id, seq_id, ciphertext, nonce) VALUES (1, ?, ?, ?)")
                                     .bind(covers_seq_id as i64)
                                     .bind(&payload.ciphertext)
@@ -308,3 +298,4 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     info!("Client {} disconnected", my_client_id);
     send_task.abort();
 }
+
