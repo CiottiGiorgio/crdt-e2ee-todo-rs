@@ -1,5 +1,5 @@
 mod automerge;
-mod commands;
+pub mod commands;
 mod constants;
 mod crypto;
 mod models;
