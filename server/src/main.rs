@@ -136,7 +136,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             }
                         }
                     }
-                    ClientMessage::Delta { payload, .. } => {
+                    ClientMessage::Delta { payload } => {
                         if let Ok(seq_id) = state.store.save_delta(&payload).await {
                             info!(
                                 "Received Delta from Client {} -> Assigned SeqId: {}",

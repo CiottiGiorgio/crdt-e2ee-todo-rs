@@ -170,7 +170,6 @@ pub fn start_sync_worker(
                                 if !local_bytes.is_empty() {
                                     if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
                                         let client_msg = ClientMessage::Delta {
-                                            seq_id: None,
                                             payload: encrypted_payload,
                                         };
                                         if let Ok(json) = serde_json::to_string(&client_msg) {

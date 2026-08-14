@@ -20,7 +20,6 @@ pub struct EncryptedPayload {
 pub enum ClientMessage {
     /// Send an incremental Automerge sync message (delta)
     Delta {
-        seq_id: Option<u64>,
         payload: EncryptedPayload,
     },
     /// Upload a compacted snapshot covering up to a specific server seq_id
