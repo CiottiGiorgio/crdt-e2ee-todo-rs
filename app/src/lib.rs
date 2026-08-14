@@ -24,14 +24,6 @@ pub fn run() {
 
     let builder = commands::get_specta_builder();
 
-    #[cfg(debug_assertions)]
-    builder
-        .export(
-            specta_typescript::Typescript::default(),
-            "../client/src/lib/bindings.ts",
-        )
-        .expect("Failed to export specta typescript bindings");
-
     #[allow(unused_mut)]
     let mut app_builder = tauri::Builder::default();
 
