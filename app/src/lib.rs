@@ -20,6 +20,7 @@ pub struct AppState {
     pub store: Arc<SqliteBackingStore>,
     pub crypto: Arc<CryptoEngine>,
     pub sync_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    pub sync_status: Arc<std::sync::RwLock<models::SyncStatus>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -90,11 +91,14 @@ pub fn run() {
             );
 
             let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
+            let sync_status = Arc::new(std::sync::RwLock::new(models::SyncStatus::Connecting));
+
             tauri::async_runtime::spawn(sync::sync_engine(
                 repo.clone(),
                 crypto.clone(),
                 store.clone(),
                 app.handle().clone(),
+                sync_status.clone(),
                 sync_rx,
             ));
 
@@ -103,6 +107,7 @@ pub fn run() {
                 store,
                 crypto,
                 sync_tx,
+                sync_status,
             });
 
             Ok(())

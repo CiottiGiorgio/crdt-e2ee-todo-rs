@@ -26,10 +26,18 @@ pub async fn sync_engine(
     crypto: Arc<CryptoEngine>,
     store: Arc<SqliteBackingStore>,
     app_handle: tauri::AppHandle,
+    sync_status: Arc<std::sync::RwLock<SyncStatus>>,
     mut rx: mpsc::UnboundedReceiver<()>,
 ) {
+    let set_status = |status: SyncStatus| {
+        if let Ok(mut lock) = sync_status.write() {
+            *lock = status.clone();
+        }
+        let _ = app_handle.emit("sync-status", status);
+    };
+
     loop {
-        let _ = app_handle.emit("sync-status", SyncStatus::Connecting);
+        set_status(SyncStatus::Connecting);
         info!("Attempting to connect to sync server at {}", WS_URL);
         let (ws_stream, _) = match connect_async(WS_URL).await {
             Ok(res) => res,
@@ -38,7 +46,7 @@ pub async fn sync_engine(
                     "Sync server not available ({}). Retrying in {} seconds...",
                     e, RECONNECT_DELAY_SECS
                 );
-                let _ = app_handle.emit("sync-status", SyncStatus::Disconnected);
+                set_status(SyncStatus::Disconnected);
                 tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
                 continue;
             }
@@ -51,16 +59,13 @@ pub async fn sync_engine(
             Ok(state) => state,
             Err(e) => {
                 error!("Failed to retrieve sync state from SQLite store: {}", e);
-                let _ = app_handle.emit(
-                    "sync-status",
-                    SyncStatus::Error(format!("SQLite sync state error: {}", e)),
-                );
+                set_status(SyncStatus::Error(format!("SQLite sync state error: {}", e)));
                 tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
                 continue;
             }
         };
         let mut highest_observed_seq = highest_observed_seq;
-        let _ = app_handle.emit("sync-status", SyncStatus::Connected);
+        set_status(SyncStatus::Connected);
 
         let debounce_duration = Duration::from_secs(SNAPSHOT_DEBOUNCE_SECS);
         let mut pending_snapshot: Option<PendingSnapshot> = None;
@@ -86,7 +91,7 @@ pub async fn sync_engine(
                         Ok(Message::Text(text)) => text,
                         Ok(Message::Close(frame)) => {
                             warn!("Server WebSocket closed connection: {:?}", frame);
-                            let _ = app_handle.emit("sync-status", SyncStatus::Disconnected);
+                            set_status(SyncStatus::Disconnected);
                             break;
                         }
                         Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
@@ -96,7 +101,7 @@ pub async fn sync_engine(
                         }
                         Err(e) => {
                             error!("WebSocket read error: {}", e);
-                            let _ = app_handle.emit("sync-status", SyncStatus::Disconnected);
+                            set_status(SyncStatus::Disconnected);
                             break;
                         }
                     };

@@ -1,7 +1,13 @@
-use crate::models::{TodoItem, TodoStatus};
+use crate::models::{SyncStatus, TodoItem, TodoStatus};
 use crate::AppState;
 use tauri::State;
 use tauri_specta::{collect_commands, Builder};
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    Ok(state.sync_status.read().map_err(|e| e.to_string())?.clone())
+}
 
 #[tauri::command]
 #[specta::specta]
@@ -48,6 +54,7 @@ pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), S
 
 pub fn get_specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new().commands(collect_commands![
+        get_sync_status,
         get_todos,
         add_todo,
         update_todo_status,

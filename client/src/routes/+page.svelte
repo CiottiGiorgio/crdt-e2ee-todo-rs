@@ -1,14 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { commands, type TodoItem, type TodoStatus } from "$lib/bindings";
-
+  import { commands, type SyncStatus, type TodoItem, type TodoStatus } from "$lib/bindings";
   import { listen } from "@tauri-apps/api/event";
-
-  type SyncStatus =
-    | { status: "connecting" }
-    | { status: "connected" }
-    | { status: "disconnected" }
-    | { status: "error"; message: string };
 
   let syncStatus = $state<SyncStatus>({ status: "connecting" });
   let todos = $state<TodoItem[]>([]);
@@ -22,8 +15,16 @@
     }
   }
 
+  async function loadSyncStatus() {
+    const res = await commands.getSyncStatus();
+    if (res.status === "ok") {
+      syncStatus = res.data;
+    }
+  }
+
   onMount(() => {
     loadTodos();
+    loadSyncStatus();
     const unlistenTodos = listen("todos-updated", () => {
       loadTodos();
     });
