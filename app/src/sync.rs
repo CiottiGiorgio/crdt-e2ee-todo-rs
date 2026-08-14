@@ -52,6 +52,11 @@ pub fn start_sync_worker(
                     let mut highest_observed_seq: u64 = 0;
                     let mut missing_deltas: BTreeSet<u64> = BTreeSet::new();
 
+                    if let Ok((highest, missing)) = repo.get_sync_state().await {
+                        highest_observed_seq = highest;
+                        missing_deltas = missing;
+                    }
+
                     // Periodic snapshot timer (e.g. every 5 minutes)
                     let mut snapshot_interval =
                         interval(Duration::from_secs(SNAPSHOT_INTERVAL_MINUTES * 60));
@@ -96,9 +101,9 @@ pub fn start_sync_worker(
                                                     if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {
                                                         if let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) {
                                                             if repo.merge_incoming(&mut incoming_doc).await.is_ok() {
-                                                                // Snapshot satisfies all missing deltas <= seq_id ONLY upon successful merge
                                                                 missing_deltas.retain(|&s| s > seq_id);
                                                                 info!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
+                                                                let _ = repo.save_sync_state(highest_observed_seq, &missing_deltas).await;
                                                                 let _ = app_handle.emit("todos-updated", ());
                                                             }
                                                         }
@@ -120,6 +125,8 @@ pub fn start_sync_worker(
                                                         }
                                                     }
 
+                                                    let _ = repo.save_sync_state(highest_observed_seq, &missing_deltas).await;
+
                                                     if merged_any {
                                                         info!("Successfully merged incoming DeltaBatch");
                                                         let _ = app_handle.emit("todos-updated", ());
@@ -139,6 +146,7 @@ pub fn start_sync_worker(
                                                     record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
                                                     // Ack indicates a sequence ID position confirmed by server
                                                     missing_deltas.remove(&seq_id);
+                                                    let _ = repo.save_sync_state(highest_observed_seq, &missing_deltas).await;
 
                                                     let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
                                                     debug!("Received Ack from server for seq_id: {} (continuous_seq: {})", seq_id, continuous_seq);

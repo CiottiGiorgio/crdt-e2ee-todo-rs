@@ -53,6 +53,14 @@ impl AutomergeTodoRepo {
         Ok(())
     }
 
+    pub async fn get_sync_state(&self) -> Result<(u64, std::collections::BTreeSet<u64>), String> {
+        self.store.get_sync_state().await
+    }
+
+    pub async fn save_sync_state(&self, highest_observed: u64, missing_ids: &std::collections::BTreeSet<u64>) -> Result<(), String> {
+        self.store.save_sync_state(highest_observed, missing_ids).await
+    }
+
     fn notify_change(&self) {
         if let Ok(guard) = self.sync_tx.read() {
             if let Some(ref tx) = *guard {
@@ -176,10 +184,14 @@ impl TodoRepository for AutomergeTodoRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::InMemoryBackingStore;
+    use crate::store::SqliteBackingStore;
 
     async fn setup_repo() -> AutomergeTodoRepo {
-        AutomergeTodoRepo::new(Box::new(InMemoryBackingStore::new()))
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .expect("Failed to connect to SQLite with sqlx");
+        AutomergeTodoRepo::new(Box::new(SqliteBackingStore::new(pool).await))
             .await
             .expect("Failed to initialize in-memory Automerge repo")
     }

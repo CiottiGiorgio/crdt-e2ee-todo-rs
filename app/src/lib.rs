@@ -41,8 +41,11 @@ pub fn run() {
     app_builder
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
+            #[cfg(debug_assertions)]
+            let database_url = "sqlite::memory:".to_string();
+
             #[cfg(not(debug_assertions))]
-            let store: Box<dyn store::BackingStore> = {
+            let database_url = {
                 let app_data_dir = app
                     .path()
                     .app_data_dir()
@@ -53,19 +56,20 @@ pub fn run() {
                         .expect("failed to create app data directory");
                 }
 
-                let doc_path = app_data_dir.join(constants::AUTOMERGE_FILE_NAME);
-                info!(
-                    "Initializing FileBackingStore Automerge document at: {:?}",
-                    doc_path
-                );
-                Box::new(store::FileBackingStore::new(doc_path))
+                let db_path = app_data_dir.join("store.db");
+                format!("sqlite://{}?mode=rwc", db_path.display())
             };
 
-            #[cfg(debug_assertions)]
-            let store: Box<dyn store::BackingStore> = {
-                info!("Initializing InMemoryBackingStore Automerge document for debug build");
-                Box::new(store::InMemoryBackingStore::new())
-            };
+            info!("Connecting to SQLite database at: {}", database_url);
+
+            let pool = tauri::async_runtime::block_on(
+                sqlx::sqlite::SqlitePoolOptions::new().connect(&database_url),
+            )
+            .expect("Failed to connect to SQLite with sqlx");
+
+            let store: Box<dyn store::BackingStore> = Box::new(
+                tauri::async_runtime::block_on(store::SqliteBackingStore::new(pool)),
+            );
 
             let repo = Arc::new(
                 tauri::async_runtime::block_on(AutomergeTodoRepo::new(store))
