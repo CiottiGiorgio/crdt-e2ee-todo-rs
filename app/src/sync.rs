@@ -4,18 +4,20 @@ mod helper;
 use crate::automerge::AutomergeTodoRepo;
 use crate::crypto::CryptoEngine;
 use crate::store::SqliteBackingStore;
-use constants::{RECONNECT_DELAY_SECS, SNAPSHOT_INTERVAL_MINUTES, WS_URL};
+use constants::{RECONNECT_DELAY_SECS, SNAPSHOT_DEBOUNCE_SECS, WS_URL};
 use futures_util::StreamExt;
 use helper::{
-    decrypt_merge_and_persist, get_encrypted_local_doc, get_highest_continuous_seq,
-    record_observed_seq, request_sync_if_missing, send_client_message,
+    decrypt_merge_and_persist, flush_pending_snapshot_on_shutdown, get_encrypted_local_doc,
+    get_highest_continuous_seq, record_observed_seq, request_sync_if_missing,
+    schedule_snapshot_if_eligible, send_client_message, PendingSnapshot,
 };
 use shared::{ClientMessage, ServerMessage};
 use std::collections::BTreeSet;
+use std::pin::Pin;
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::mpsc;
-use tokio::time::{interval, Duration};
+use tokio::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
 
@@ -49,29 +51,39 @@ pub async fn sync_engine(
             missing_deltas = missing;
         }
 
-        // Periodic snapshot timer (e.g. every 5 minutes)
-        let mut snapshot_interval = interval(Duration::from_secs(SNAPSHOT_INTERVAL_MINUTES * 60));
-        // Skip the immediate first tick on connection
-        snapshot_interval.tick().await;
+        let debounce_duration = Duration::from_secs(SNAPSHOT_DEBOUNCE_SECS);
+        let mut pending_snapshot: Option<PendingSnapshot> = None;
+        let mut snapshot_debounce: Option<Pin<Box<tokio::time::Sleep>>> = None;
+
+        schedule_snapshot_if_eligible(
+            &repo,
+            &crypto,
+            highest_observed_seq,
+            &missing_deltas,
+            &mut pending_snapshot,
+            &mut snapshot_debounce,
+            debounce_duration,
+        );
 
         loop {
             tokio::select! {
-                // Periodic Snapshot Timer Triggered
-                _ = snapshot_interval.tick() => {
-                    let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
-                    // A snapshot can ONLY be uploaded if we are fully caught up without any missing holes
-                    if missing_deltas.is_empty() && continuous_seq > 0 {
-                        if let Some(payload) = get_encrypted_local_doc(&repo, &crypto) {
+                // Debounced Snapshot Timer Triggered
+                _ = async { snapshot_debounce.as_mut().unwrap().await }, if snapshot_debounce.is_some() => {
+                    snapshot_debounce = None;
+                    if let Some(pending) = pending_snapshot.take() {
+                        let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
+                        // A snapshot can ONLY be uploaded if we are fully caught up without any missing holes
+                        if missing_deltas.is_empty() && continuous_seq >= pending.covers_seq_id {
                             let client_msg = ClientMessage::Snapshot {
-                                covers_seq_id: continuous_seq,
-                                payload,
+                                covers_seq_id: pending.covers_seq_id,
+                                payload: pending.payload,
                             };
                             if send_client_message(&mut write, &client_msg).await.is_ok() {
-                                info!("Pushed periodic snapshot (covers seq_id: {}) to server!", continuous_seq);
+                                info!("Pushed debounced snapshot (covers seq_id: {}) to server!", pending.covers_seq_id);
                             }
+                        } else {
+                            debug!("Skipping debounced snapshot: missing_deltas has {} holes, continuous_seq={}", missing_deltas.len(), continuous_seq);
                         }
-                    } else {
-                        debug!("Skipping periodic snapshot: missing_deltas has {} holes, continuous_seq={}", missing_deltas.len(), continuous_seq);
                     }
                 }
 
@@ -83,6 +95,18 @@ pub async fn sync_engine(
                                 match server_msg {
                                     ServerMessage::Snapshot { seq_id, payload } => {
                                         record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
+
+                                        // Cancel any pending snapshot in the chamber covered by this incoming snapshot
+                                        if let Some(pending) = &pending_snapshot {
+                                            if seq_id >= pending.covers_seq_id {
+                                                debug!(
+                                                    "Cancelled chambered snapshot (covers seq_id: {}) because incoming snapshot (seq_id: {}) covers it",
+                                                    pending.covers_seq_id, seq_id
+                                                );
+                                                pending_snapshot = None;
+                                                snapshot_debounce = None;
+                                            }
+                                        }
 
                                         if decrypt_merge_and_persist(&repo, &crypto, &store, &payload).await {
                                             missing_deltas.retain(|&s| s > seq_id);
@@ -108,6 +132,15 @@ pub async fn sync_engine(
                                         if merged_any {
                                             info!("Successfully merged incoming DeltaBatch");
                                             let _ = app_handle.emit("todos-updated", ());
+                                            schedule_snapshot_if_eligible(
+                                                &repo,
+                                                &crypto,
+                                                highest_observed_seq,
+                                                &missing_deltas,
+                                                &mut pending_snapshot,
+                                                &mut snapshot_debounce,
+                                                debounce_duration,
+                                            );
                                         }
 
                                         request_sync_if_missing(&mut write, highest_observed_seq, &missing_deltas).await;
@@ -120,6 +153,16 @@ pub async fn sync_engine(
 
                                         let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
                                         debug!("Received Ack from server for seq_id: {} (continuous_seq: {})", seq_id, continuous_seq);
+
+                                        schedule_snapshot_if_eligible(
+                                            &repo,
+                                            &crypto,
+                                            highest_observed_seq,
+                                            &missing_deltas,
+                                            &mut pending_snapshot,
+                                            &mut snapshot_debounce,
+                                            debounce_duration,
+                                        );
 
                                         request_sync_if_missing(&mut write, highest_observed_seq, &missing_deltas).await;
                                     }
@@ -134,17 +177,56 @@ pub async fn sync_engine(
                     }
                 }
 
-                // Local change notification triggered from Tauri command
-                Some(_) = rx.recv() => {
-                    if let Some(payload) = get_encrypted_local_doc(&repo, &crypto) {
-                        let client_msg = ClientMessage::Delta { payload };
-                        if send_client_message(&mut write, &client_msg).await.is_err() {
-                            error!("Failed to push local delta update to server");
-                            break;
-                        } else {
-                            info!("Pushed local delta update immediately to server!");
+                // Local change notification or shutdown when sender drops
+                change_msg = rx.recv() => {
+                    match change_msg {
+                        Some(_) => {
+                            if let Some(payload) = get_encrypted_local_doc(&repo, &crypto) {
+                                let client_msg = ClientMessage::Delta { payload };
+                                if send_client_message(&mut write, &client_msg).await.is_err() {
+                                    error!("Failed to push local delta update to server");
+                                    break;
+                                } else {
+                                    info!("Pushed local delta update immediately to server!");
+                                    schedule_snapshot_if_eligible(
+                                        &repo,
+                                        &crypto,
+                                        highest_observed_seq,
+                                        &missing_deltas,
+                                        &mut pending_snapshot,
+                                        &mut snapshot_debounce,
+                                        debounce_duration,
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            info!("Shutdown signal received: firing pending snapshot immediately...");
+                            flush_pending_snapshot_on_shutdown(
+                                &mut write,
+                                &mut pending_snapshot,
+                                &repo,
+                                &crypto,
+                                highest_observed_seq,
+                                &missing_deltas,
+                            ).await;
+                            return;
                         }
                     }
+                }
+
+                // Process shutdown signal (Ctrl+C)
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Shutdown signal (Ctrl+C) received: firing pending snapshot immediately...");
+                    flush_pending_snapshot_on_shutdown(
+                        &mut write,
+                        &mut pending_snapshot,
+                        &repo,
+                        &crypto,
+                        highest_observed_seq,
+                        &missing_deltas,
+                    ).await;
+                    return;
                 }
             }
         }
