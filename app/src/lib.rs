@@ -7,16 +7,19 @@ pub mod store;
 mod sync;
 
 use crypto::CryptoEngine;
-use repository::automerge::AutomergeTodoRepo;
-use repository::TodoRepository;
+use repository::AutomergeTodoRepo;
 use std::sync::Arc;
+use store::SqliteBackingStore;
 use tauri::Manager;
 
 #[cfg(not(debug_assertions))]
 use tracing::info;
 
 pub struct AppState {
-    pub todo_repo: Arc<dyn TodoRepository>,
+    pub repo: Arc<AutomergeTodoRepo>,
+    pub store: Arc<SqliteBackingStore>,
+    pub crypto: Arc<CryptoEngine>,
+    pub sync_tx: tokio::sync::mpsc::UnboundedSender<()>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -63,19 +66,42 @@ pub fn run() {
                     .expect("failed to initialize sqlite backing store")
             };
 
-            let repo = Arc::new(
-                tauri::async_runtime::block_on(AutomergeTodoRepo::new(store))
-                    .expect("failed to initialize automerge repository"),
-            );
+            let store = Arc::new(store);
 
             // Shared E2EE Symmetric Key (32 bytes)
             let master_key = [42u8; 32];
             let crypto = Arc::new(CryptoEngine::new(&master_key));
 
-            let sync_tx = sync::start_sync_worker(repo.clone(), crypto, app.handle().clone());
-            repo.set_sync_notifier(sync_tx);
+            let encrypted_data = tauri::async_runtime::block_on(store.load())
+                .expect("failed to load data from store");
 
-            app.manage(AppState { todo_repo: repo });
+            let decrypted_data = match encrypted_data {
+                Some(data) => {
+                    let payload: shared::EncryptedPayload =
+                        serde_json::from_slice(&data).expect("failed to deserialize payload");
+                    Some(crypto.decrypt(&payload).expect("failed to decrypt data"))
+                }
+                None => None,
+            };
+
+            let repo = Arc::new(
+                AutomergeTodoRepo::new(decrypted_data)
+                    .expect("failed to initialize automerge repository"),
+            );
+
+            let sync_tx = sync::start_sync_worker(
+                repo.clone(),
+                crypto.clone(),
+                store.clone(),
+                app.handle().clone(),
+            );
+
+            app.manage(AppState {
+                repo,
+                store,
+                crypto,
+                sync_tx,
+            });
 
             Ok(())
         })

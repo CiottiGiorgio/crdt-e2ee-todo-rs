@@ -1,6 +1,7 @@
 use crate::constants::SNAPSHOT_INTERVAL_MINUTES;
 use crate::crypto::CryptoEngine;
-use crate::repository::automerge::AutomergeTodoRepo;
+use crate::repository::AutomergeTodoRepo;
+use crate::store::SqliteBackingStore;
 use automerge::AutoCommit;
 use futures_util::{SinkExt, StreamExt};
 use shared::{ClientMessage, ServerMessage};
@@ -35,6 +36,7 @@ fn record_observed_seq(
 pub fn start_sync_worker(
     repo: Arc<AutomergeTodoRepo>,
     crypto: Arc<CryptoEngine>,
+    store: Arc<SqliteBackingStore>,
     app_handle: tauri::AppHandle,
 ) -> mpsc::UnboundedSender<()> {
     let (tx, mut rx) = mpsc::unbounded_channel::<()>();
@@ -52,7 +54,7 @@ pub fn start_sync_worker(
                     let mut highest_observed_seq: u64 = 0;
                     let mut missing_deltas: BTreeSet<u64> = BTreeSet::new();
 
-                    if let Ok((highest, missing)) = repo.get_sync_state().await {
+                    if let Ok((highest, missing)) = store.get_sync_state().await {
                         highest_observed_seq = highest;
                         missing_deltas = missing;
                     }
@@ -100,10 +102,15 @@ pub fn start_sync_worker(
 
                                                     if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {
                                                         if let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) {
-                                                            if repo.merge_incoming(&mut incoming_doc).await.is_ok() {
+                                                            if let Ok(merged_bytes) = repo.merge_incoming(&mut incoming_doc) {
+                                                                if let Ok(encrypted_merged) = crypto.encrypt(&merged_bytes) {
+                                                                    if let Ok(bytes) = serde_json::to_vec(&encrypted_merged) {
+                                                                        let _ = store.save(&bytes).await;
+                                                                    }
+                                                                }
                                                                 missing_deltas.retain(|&s| s > seq_id);
                                                                 info!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
-                                                                let _ = repo.save_sync_state(highest_observed_seq, &missing_deltas).await;
+                                                                let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
                                                                 let _ = app_handle.emit("todos-updated", ());
                                                             }
                                                         }
@@ -116,7 +123,12 @@ pub fn start_sync_worker(
 
                                                         if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {
                                                             if let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) {
-                                                                if repo.merge_incoming(&mut incoming_doc).await.is_ok() {
+                                                                if let Ok(merged_bytes) = repo.merge_incoming(&mut incoming_doc) {
+                                                                    if let Ok(encrypted_merged) = crypto.encrypt(&merged_bytes) {
+                                                                        if let Ok(bytes) = serde_json::to_vec(&encrypted_merged) {
+                                                                            let _ = store.save(&bytes).await;
+                                                                        }
+                                                                    }
                                                                     merged_any = true;
                                                                     // Only mark delta as satisfied if decrypt & merge succeeded
                                                                     missing_deltas.remove(&seq_id);
@@ -125,7 +137,7 @@ pub fn start_sync_worker(
                                                         }
                                                     }
 
-                                                    let _ = repo.save_sync_state(highest_observed_seq, &missing_deltas).await;
+                                                    let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
 
                                                     if merged_any {
                                                         info!("Successfully merged incoming DeltaBatch");
@@ -146,7 +158,7 @@ pub fn start_sync_worker(
                                                     record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
                                                     // Ack indicates a sequence ID position confirmed by server
                                                     missing_deltas.remove(&seq_id);
-                                                    let _ = repo.save_sync_state(highest_observed_seq, &missing_deltas).await;
+                                                    let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
 
                                                     let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
                                                     debug!("Received Ack from server for seq_id: {} (continuous_seq: {})", seq_id, continuous_seq);

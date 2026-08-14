@@ -5,16 +5,48 @@ mod models;
 
 use models::{TodoItem, TodoStatus};
 
-#[async_trait::async_trait]
-pub trait TodoRepository: Send + Sync {
-    async fn get_all(&self) -> Result<Vec<TodoItem>, String>;
-    async fn add(&self, text: String) -> Result<TodoItem, String>;
-    async fn update_status(&self, id: String, status: TodoStatus) -> Result<(), String>;
-    async fn delete(&self, id: String) -> Result<(), String>;
+pub struct MockRepo;
+impl MockRepo {
+    pub async fn get_all(&self) -> Result<Vec<TodoItem>, String> {
+        unimplemented!()
+    }
+    pub async fn add(&self, _text: String) -> Result<(TodoItem, Vec<u8>), String> {
+        unimplemented!()
+    }
+    pub async fn update_status(&self, _id: String, _status: TodoStatus) -> Result<Vec<u8>, String> {
+        unimplemented!()
+    }
+    pub async fn delete(&self, _id: String) -> Result<Vec<u8>, String> {
+        unimplemented!()
+    }
+}
+
+pub struct MockCrypto;
+impl MockCrypto {
+    pub fn encrypt(&self, _data: &[u8]) -> Result<Vec<u8>, String> {
+        unimplemented!()
+    }
+}
+
+pub struct MockStore;
+impl MockStore {
+    pub async fn save(&self, _data: &[u8]) -> Result<(), String> {
+        unimplemented!()
+    }
+}
+
+pub struct MockSyncTx;
+impl MockSyncTx {
+    pub fn send(&self, _val: ()) -> Result<(), ()> {
+        unimplemented!()
+    }
 }
 
 pub struct AppState {
-    pub todo_repo: Arc<dyn TodoRepository>,
+    pub repo: Arc<MockRepo>,
+    pub crypto: Arc<MockCrypto>,
+    pub store: Arc<MockStore>,
+    pub sync_tx: MockSyncTx,
 }
 
 #[path = "src/commands.rs"]
