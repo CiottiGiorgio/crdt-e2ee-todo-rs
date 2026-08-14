@@ -5,16 +5,16 @@ use uuid::Uuid;
 
 use crate::models::{TodoItem, TodoStatus};
 use crate::repository::TodoRepository;
-use crate::store::BackingStore;
+use crate::store::SqliteBackingStore;
 
 pub struct AutomergeTodoRepo {
     doc: RwLock<AutoCommit>,
-    store: Box<dyn BackingStore>,
+    store: SqliteBackingStore,
     sync_tx: RwLock<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
 }
 
 impl AutomergeTodoRepo {
-    pub async fn new(store: Box<dyn BackingStore>) -> Result<Self, String> {
+    pub async fn new(store: SqliteBackingStore) -> Result<Self, String> {
         let doc = match store.load().await? {
             Some(data) => AutoCommit::load(&data)
                 .map_err(|e| format!("Failed to load automerge doc: {}", e))?,
@@ -57,8 +57,14 @@ impl AutomergeTodoRepo {
         self.store.get_sync_state().await
     }
 
-    pub async fn save_sync_state(&self, highest_observed: u64, missing_ids: &std::collections::BTreeSet<u64>) -> Result<(), String> {
-        self.store.save_sync_state(highest_observed, missing_ids).await
+    pub async fn save_sync_state(
+        &self,
+        highest_observed: u64,
+        missing_ids: &std::collections::BTreeSet<u64>,
+    ) -> Result<(), String> {
+        self.store
+            .save_sync_state(highest_observed, missing_ids)
+            .await
     }
 
     fn notify_change(&self) {
@@ -191,7 +197,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("Failed to connect to SQLite with sqlx");
-        AutomergeTodoRepo::new(Box::new(SqliteBackingStore::new(pool).await))
+        AutomergeTodoRepo::new(SqliteBackingStore::new(pool).await)
             .await
             .expect("Failed to initialize in-memory Automerge repo")
     }

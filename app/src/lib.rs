@@ -67,9 +67,7 @@ pub fn run() {
             )
             .expect("Failed to connect to SQLite with sqlx");
 
-            let store: Box<dyn store::BackingStore> = Box::new(
-                tauri::async_runtime::block_on(store::SqliteBackingStore::new(pool)),
-            );
+            let store = tauri::async_runtime::block_on(store::SqliteBackingStore::new(pool));
 
             let repo = Arc::new(
                 tauri::async_runtime::block_on(AutomergeTodoRepo::new(store))

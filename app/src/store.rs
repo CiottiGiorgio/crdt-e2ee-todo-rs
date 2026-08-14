@@ -1,30 +1,8 @@
-use async_trait::async_trait;
 use sqlx::SqlitePool;
 use std::collections::BTreeSet;
 
-/// Async trait representing a backing store for binary document data (e.g., Automerge documents)
+/// SQLite-backed store for binary document data (e.g., Automerge documents)
 /// and synchronization metadata.
-#[async_trait]
-pub trait BackingStore: Send + Sync {
-    /// Loads document bytes from the store.
-    /// Returns `Ok(Some(bytes))` if data exists, `Ok(None)` if no saved data exists, or `Err` on failure.
-    async fn load(&self) -> Result<Option<Vec<u8>>, String>;
-
-    /// Saves document bytes to the store.
-    async fn save(&self, data: &[u8]) -> Result<(), String>;
-
-    /// Gets the current synchronization state.
-    async fn get_sync_state(&self) -> Result<(u64, BTreeSet<u64>), String>;
-
-    /// Saves the current synchronization state.
-    async fn save_sync_state(
-        &self,
-        highest_observed: u64,
-        missing_ids: &BTreeSet<u64>,
-    ) -> Result<(), String>;
-}
-
-/// SQLite-backed implementation of [`BackingStore`].
 pub struct SqliteBackingStore {
     pool: SqlitePool,
 }
@@ -38,21 +16,20 @@ impl SqliteBackingStore {
 
         Self { pool }
     }
-}
 
-#[async_trait]
-impl BackingStore for SqliteBackingStore {
-    async fn load(&self) -> Result<Option<Vec<u8>>, String> {
-        let row: Option<(Vec<u8>,)> =
-            sqlx::query_as("SELECT data FROM automerge_doc WHERE id = 1")
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| e.to_string())?;
+    /// Loads document bytes from the store.
+    /// Returns `Ok(Some(bytes))` if data exists, `Ok(None)` if no saved data exists, or `Err` on failure.
+    pub async fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT data FROM automerge_doc WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| e.to_string())?;
 
         Ok(row.map(|r| r.0))
     }
 
-    async fn save(&self, data: &[u8]) -> Result<(), String> {
+    /// Saves document bytes to the store.
+    pub async fn save(&self, data: &[u8]) -> Result<(), String> {
         sqlx::query("INSERT OR REPLACE INTO automerge_doc (id, data) VALUES (1, ?)")
             .bind(data)
             .execute(&self.pool)
@@ -61,7 +38,8 @@ impl BackingStore for SqliteBackingStore {
         Ok(())
     }
 
-    async fn get_sync_state(&self) -> Result<(u64, BTreeSet<u64>), String> {
+    /// Gets the current synchronization state.
+    pub async fn get_sync_state(&self) -> Result<(u64, BTreeSet<u64>), String> {
         let row: Option<(i64, String)> =
             sqlx::query_as("SELECT highest_observed, missing_ids FROM sync_state WHERE id = 1")
                 .fetch_optional(&self.pool)
@@ -79,7 +57,8 @@ impl BackingStore for SqliteBackingStore {
         }
     }
 
-    async fn save_sync_state(
+    /// Saves the current synchronization state.
+    pub async fn save_sync_state(
         &self,
         highest_observed: u64,
         missing_ids: &BTreeSet<u64>,
