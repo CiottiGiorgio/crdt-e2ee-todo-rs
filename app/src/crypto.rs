@@ -15,12 +15,12 @@ impl CryptoEngine {
 
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<EncryptedPayload, String> {
         let mut nonce_bytes = [0u8; IV_SIZE];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from(nonce_bytes);
 
         let ciphertext = self
             .cipher
-            .encrypt(nonce, plaintext)
+            .encrypt(&nonce, plaintext)
             .map_err(|e| format!("Encryption error: {}", e))?;
 
         Ok(EncryptedPayload {
@@ -30,9 +30,9 @@ impl CryptoEngine {
     }
 
     pub fn decrypt(&self, payload: &EncryptedPayload) -> Result<Vec<u8>, String> {
-        let nonce = Nonce::from_slice(&payload.nonce);
+        let nonce = Nonce::from(payload.nonce);
         self.cipher
-            .decrypt(nonce, payload.ciphertext.as_slice())
+            .decrypt(&nonce, payload.ciphertext.as_slice())
             .map_err(|e| format!("Decryption error: {}", e))
     }
 }
