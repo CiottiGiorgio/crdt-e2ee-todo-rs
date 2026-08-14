@@ -1,6 +1,6 @@
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
-use rand::RngCore;
+use rand::Rng;
 use shared::{EncryptedPayload, IV_SIZE, KEY_SIZE};
 
 pub struct CryptoEngine {
