@@ -10,7 +10,6 @@ use crypto::CryptoEngine;
 use repository::automerge::AutomergeTodoRepo;
 use repository::TodoRepository;
 use std::sync::Arc;
-use store::FileBackingStore;
 use tauri::Manager;
 
 use tracing::info;
@@ -33,25 +32,51 @@ pub fn run() {
         )
         .expect("Failed to export specta typescript bindings");
 
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut app_builder = tauri::Builder::default();
+
+    #[cfg(not(debug_assertions))]
+    {
+        app_builder = app_builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            info!("Single instance signal received: bringing window to focus.");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    app_builder
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("failed to resolve app data directory");
+            #[cfg(not(debug_assertions))]
+            let store: Box<dyn store::BackingStore> = {
+                let app_data_dir = app
+                    .path()
+                    .app_data_dir()
+                    .expect("failed to resolve app data directory");
 
-            if !app_data_dir.exists() {
-                std::fs::create_dir_all(&app_data_dir)
-                    .expect("failed to create app data directory");
-            }
+                if !app_data_dir.exists() {
+                    std::fs::create_dir_all(&app_data_dir)
+                        .expect("failed to create app data directory");
+                }
 
-            let doc_path = app_data_dir.join(constants::AUTOMERGE_FILE_NAME);
-            info!("Initializing Automerge document at: {:?}", doc_path);
+                let doc_path = app_data_dir.join(constants::AUTOMERGE_FILE_NAME);
+                info!(
+                    "Initializing FileBackingStore Automerge document at: {:?}",
+                    doc_path
+                );
+                Box::new(store::FileBackingStore::new(doc_path))
+            };
 
-            let store = FileBackingStore::new(doc_path);
+            #[cfg(debug_assertions)]
+            let store: Box<dyn store::BackingStore> = {
+                info!("Initializing InMemoryBackingStore Automerge document for debug build");
+                Box::new(store::InMemoryBackingStore::new())
+            };
+
             let repo = Arc::new(
-                tauri::async_runtime::block_on(AutomergeTodoRepo::new(Box::new(store)))
+                tauri::async_runtime::block_on(AutomergeTodoRepo::new(store))
                     .expect("failed to initialize automerge repository"),
             );
 
