@@ -4,6 +4,13 @@
 
   import { listen } from "@tauri-apps/api/event";
 
+  type SyncStatus =
+    | { status: "connecting" }
+    | { status: "connected" }
+    | { status: "disconnected" }
+    | { status: "error"; message: string };
+
+  let syncStatus = $state<SyncStatus>({ status: "connecting" });
   let todos = $state<TodoItem[]>([]);
 
   async function loadTodos() {
@@ -17,11 +24,15 @@
 
   onMount(() => {
     loadTodos();
-    const unlistenPromise = listen("todos-updated", () => {
+    const unlistenTodos = listen("todos-updated", () => {
       loadTodos();
     });
+    const unlistenSync = listen<SyncStatus>("sync-status", (event) => {
+      syncStatus = event.payload;
+    });
     return () => {
-      unlistenPromise.then((unlisten) => unlisten());
+      unlistenTodos.then((u) => u());
+      unlistenSync.then((u) => u());
     };
   });
 
@@ -71,7 +82,21 @@
 </script>
 
 <main class="container">
-  <h1>Todo List</h1>
+  <div class="header-row">
+    <h1>Todo List</h1>
+    <div class="sync-badge {syncStatus.status}">
+      <span class="sync-dot"></span>
+      {#if syncStatus.status === "connected"}
+        <span>Synced</span>
+      {:else if syncStatus.status === "connecting"}
+        <span>Connecting...</span>
+      {:else if syncStatus.status === "disconnected"}
+        <span>Local</span>
+      {:else if syncStatus.status === "error"}
+        <span>Sync Error: {syncStatus.message}</span>
+      {/if}
+    </div>
+  </div>
 
   <form onsubmit={addTodo} class="todo-form">
     <input
@@ -245,8 +270,63 @@
     font-family: sans-serif;
   }
 
-  h1 {
+  .header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     margin-bottom: 20px;
+  }
+
+  .header-row h1 {
+    margin: 0;
+  }
+
+  .sync-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-weight: 500;
+  }
+
+  .sync-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  .sync-badge.connected {
+    background-color: #e6f4ea;
+    color: #137333;
+  }
+  .sync-badge.connected .sync-dot {
+    background-color: #137333;
+  }
+
+  .sync-badge.connecting {
+    background-color: #fef7e0;
+    color: #b06000;
+  }
+  .sync-badge.connecting .sync-dot {
+    background-color: #b06000;
+  }
+
+  .sync-badge.disconnected {
+    background-color: #f1f3f4;
+    color: #5f6368;
+  }
+  .sync-badge.disconnected .sync-dot {
+    background-color: #5f6368;
+  }
+
+  .sync-badge.error {
+    background-color: #fce8e6;
+    color: #c5221f;
+  }
+  .sync-badge.error .sync-dot {
+    background-color: #c5221f;
   }
 
   h2 {

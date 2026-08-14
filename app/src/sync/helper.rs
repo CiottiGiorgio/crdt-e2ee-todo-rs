@@ -35,7 +35,7 @@ pub fn record_observed_seq(
     }
 }
 
-async fn try_decrypt_merge_and_persist(
+pub async fn decrypt_merge_and_persist(
     repo: &AutomergeTodoRepo,
     crypto: &CryptoEngine,
     store: &SqliteBackingStore,
@@ -50,58 +50,46 @@ async fn try_decrypt_merge_and_persist(
     Ok(())
 }
 
-pub async fn decrypt_merge_and_persist(
-    repo: &AutomergeTodoRepo,
-    crypto: &CryptoEngine,
-    store: &SqliteBackingStore,
-    payload: &EncryptedPayload,
-) -> bool {
-    if let Err(e) = try_decrypt_merge_and_persist(repo, crypto, store, payload).await {
-        tracing::error!("Failed to decrypt, merge, or persist payload: {}", e);
-        false
-    } else {
-        true
-    }
-}
-
 pub fn get_encrypted_local_doc(
     repo: &AutomergeTodoRepo,
     crypto: &CryptoEngine,
-) -> Option<EncryptedPayload> {
+) -> Result<Option<EncryptedPayload>, String> {
     let local_bytes = repo.get_doc_bytes();
     if local_bytes.is_empty() {
-        return None;
+        return Ok(None);
     }
-    crypto.encrypt(&local_bytes).ok()
+    crypto.encrypt(&local_bytes).map(Some)
 }
 
-pub async fn send_client_message<S>(write: &mut S, msg: &ClientMessage) -> Result<(), S::Error>
+pub async fn send_client_message<S>(write: &mut S, msg: &ClientMessage) -> Result<(), String>
 where
     S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
 {
-    match serde_json::to_string(msg) {
-        Ok(json) => write.send(Message::Text(json.into())).await,
-        Err(e) => {
-            tracing::error!("Failed to serialize ClientMessage to JSON: {}", e);
-            Ok(())
-        }
-    }
+    let json = serde_json::to_string(msg).map_err(|e| e.to_string())?;
+    write
+        .send(Message::Text(json.into()))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 pub async fn request_sync_if_missing<S>(
     write: &mut S,
     highest_observed_seq: u64,
     missing_deltas: &BTreeSet<u64>,
-) where
+) -> Result<(), String>
+where
     S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
 {
     if !missing_deltas.is_empty() {
         let continuous_seq = get_highest_continuous_seq(highest_observed_seq, missing_deltas);
         let req_sync = ClientMessage::RequestSync {
             from_seq_id: continuous_seq,
         };
-        let _ = send_client_message(write, &req_sync).await;
+        send_client_message(write, &req_sync).await?;
     }
+    Ok(())
 }
 
 pub fn schedule_snapshot_if_eligible(
@@ -112,7 +100,7 @@ pub fn schedule_snapshot_if_eligible(
     pending_snapshot: &mut Option<PendingSnapshot>,
     snapshot_debounce: &mut Option<Pin<Box<tokio::time::Sleep>>>,
     debounce_duration: Duration,
-) {
+) -> Result<(), String> {
     let continuous_seq = get_highest_continuous_seq(highest_observed_seq, missing_deltas);
     if missing_deltas.is_empty() && continuous_seq > 0 {
         let should_update = match pending_snapshot.as_ref() {
@@ -121,7 +109,7 @@ pub fn schedule_snapshot_if_eligible(
         };
 
         if should_update {
-            if let Some(payload) = get_encrypted_local_doc(repo, crypto) {
+            if let Some(payload) = get_encrypted_local_doc(repo, crypto)? {
                 *pending_snapshot = Some(PendingSnapshot {
                     covers_seq_id: continuous_seq,
                     payload,
@@ -135,6 +123,7 @@ pub fn schedule_snapshot_if_eligible(
             }
         }
     }
+    Ok(())
 }
 
 pub async fn flush_pending_snapshot_on_shutdown<S>(
@@ -144,33 +133,34 @@ pub async fn flush_pending_snapshot_on_shutdown<S>(
     crypto: &CryptoEngine,
     highest_observed_seq: u64,
     missing_deltas: &BTreeSet<u64>,
-) where
+) -> Result<(), String>
+where
     S: SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
 {
     let continuous_seq = get_highest_continuous_seq(highest_observed_seq, missing_deltas);
-    let snapshot_to_send = pending_snapshot.take().or_else(|| {
-        if missing_deltas.is_empty() && continuous_seq > 0 {
-            get_encrypted_local_doc(repo, crypto).map(|payload| PendingSnapshot {
-                covers_seq_id: continuous_seq,
-                payload,
-            })
-        } else {
-            None
+    let snapshot_to_send = match pending_snapshot.take() {
+        Some(pending) => Some(pending),
+        None => {
+            if missing_deltas.is_empty() && continuous_seq > 0 {
+                get_encrypted_local_doc(repo, crypto)?
+                    .map(|payload| PendingSnapshot { covers_seq_id: continuous_seq, payload })
+            } else {
+                None
+            }
         }
-    });
+    };
 
     if let Some(pending) = snapshot_to_send {
         let client_msg = ClientMessage::Snapshot {
             covers_seq_id: pending.covers_seq_id,
             payload: pending.payload,
         };
-        if send_client_message(write, &client_msg).await.is_ok() {
-            tracing::info!(
-                "Pushed immediate snapshot on shutdown (covers seq_id: {}) to server!",
-                pending.covers_seq_id
-            );
-        } else {
-            tracing::warn!("Failed to send immediate snapshot on shutdown");
-        }
+        send_client_message(write, &client_msg).await?;
+        tracing::info!(
+            "Pushed immediate snapshot on shutdown (covers seq_id: {}) to server!",
+            pending.covers_seq_id
+        );
     }
+    Ok(())
 }

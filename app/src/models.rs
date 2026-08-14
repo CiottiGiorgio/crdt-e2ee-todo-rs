@@ -17,3 +17,12 @@ pub struct TodoItem {
     pub text: String,
     pub status: TodoStatus,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "status", content = "message", rename_all = "camelCase")]
+pub enum SyncStatus {
+    Connecting,
+    Connected,
+    Disconnected,
+    Error(String),
+}
