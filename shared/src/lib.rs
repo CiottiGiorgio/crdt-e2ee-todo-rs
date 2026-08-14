@@ -19,9 +19,7 @@ pub struct EncryptedPayload {
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
     /// Send an incremental Automerge sync message (delta)
-    Delta {
-        payload: EncryptedPayload,
-    },
+    Delta { payload: EncryptedPayload },
     /// Upload a compacted snapshot covering up to a specific server seq_id
     Snapshot {
         covers_seq_id: u64,
