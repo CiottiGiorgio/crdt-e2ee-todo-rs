@@ -1,12 +1,30 @@
+use async_trait::async_trait;
 use shared::EncryptedPayload;
 use sqlx::{Row, SqlitePool};
 
+/// Trait representing the server-side sync storage backend.
+#[async_trait]
+pub trait SyncStore: Send + Sync {
+    async fn get_highest_seq_id(&self) -> Result<u64, sqlx::Error>;
+    async fn get_snapshot(&self) -> Result<Option<(u64, EncryptedPayload)>, sqlx::Error>;
+    async fn get_deltas_after(
+        &self,
+        from_seq_id: u64,
+    ) -> Result<Vec<(u64, EncryptedPayload)>, sqlx::Error>;
+    async fn save_delta(&self, payload: &EncryptedPayload) -> Result<u64, sqlx::Error>;
+    async fn save_snapshot(
+        &self,
+        covers_seq_id: u64,
+        payload: &EncryptedPayload,
+    ) -> Result<bool, sqlx::Error>;
+}
+
 #[derive(Clone)]
-pub struct SyncStore {
+pub struct SqliteSyncStore {
     pool: SqlitePool,
 }
 
-impl SyncStore {
+impl SqliteSyncStore {
     pub async fn new(pool: SqlitePool) -> Self {
         sqlx::migrate!("./migrations")
             .run(&pool)
@@ -15,15 +33,18 @@ impl SyncStore {
 
         Self { pool }
     }
+}
 
-    pub async fn get_highest_seq_id(&self) -> Result<u64, sqlx::Error> {
+#[async_trait]
+impl SyncStore for SqliteSyncStore {
+    async fn get_highest_seq_id(&self) -> Result<u64, sqlx::Error> {
         sqlx::query_scalar::<_, i64>("SELECT highest_seq_id FROM server_state")
             .fetch_one(&self.pool)
             .await
             .map(|v| v as u64)
     }
 
-    pub async fn get_snapshot(&self) -> Result<Option<(u64, EncryptedPayload)>, sqlx::Error> {
+    async fn get_snapshot(&self) -> Result<Option<(u64, EncryptedPayload)>, sqlx::Error> {
         let row = sqlx::query("SELECT seq_id, ciphertext, nonce FROM snapshot WHERE id = 1")
             .fetch_optional(&self.pool)
             .await?;
@@ -42,7 +63,7 @@ impl SyncStore {
         Ok(None)
     }
 
-    pub async fn get_deltas_after(
+    async fn get_deltas_after(
         &self,
         from_seq_id: u64,
     ) -> Result<Vec<(u64, EncryptedPayload)>, sqlx::Error> {
@@ -65,7 +86,7 @@ impl SyncStore {
         Ok(deltas)
     }
 
-    pub async fn save_delta(&self, payload: &EncryptedPayload) -> Result<u64, sqlx::Error> {
+    async fn save_delta(&self, payload: &EncryptedPayload) -> Result<u64, sqlx::Error> {
         let highest_seq = self.get_highest_seq_id().await.unwrap_or(0);
         let seq = highest_seq + 1;
 
@@ -81,7 +102,7 @@ impl SyncStore {
         Ok(seq)
     }
 
-    pub async fn save_snapshot(
+    async fn save_snapshot(
         &self,
         covers_seq_id: u64,
         payload: &EncryptedPayload,

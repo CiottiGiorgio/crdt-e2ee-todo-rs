@@ -7,13 +7,14 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use shared::{ClientMessage, ServerMessage};
 use sqlx::sqlite::SqlitePoolOptions;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
 mod sync_store;
-use sync_store::SyncStore;
+use sync_store::{SqliteSyncStore, SyncStore};
 
 // FIXME: We don't want sequential numbers for the connected clients as this potentially leaks
 //  how many clients are connected at a given time.
@@ -21,7 +22,7 @@ static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
 struct AppState {
-    store: SyncStore,
+    store: Arc<dyn SyncStore>,
     tx: broadcast::Sender<(usize, ServerMessage)>,
 }
 
@@ -29,12 +30,20 @@ struct AppState {
 async fn main() {
     tracing_subscriber::fmt::init();
 
+    #[cfg(debug_assertions)]
+    let database_url = "sqlite::memory:";
+
+    #[cfg(not(debug_assertions))]
+    let database_url = "sqlite://sync_store.db?mode=rwc";
+
+    info!("Connecting to SQLite database at: {}", database_url);
+
     let pool = SqlitePoolOptions::new()
-        .connect("sqlite://sync_store.db?mode=rwc")
+        .connect(database_url)
         .await
         .expect("Failed to connect to SQLite with sqlx");
 
-    let sync_store = SyncStore::new(pool).await;
+    let sync_store: Arc<dyn SyncStore> = Arc::new(SqliteSyncStore::new(pool).await);
 
     let (tx, _rx) = broadcast::channel::<(usize, ServerMessage)>(100);
     let state = AppState {
