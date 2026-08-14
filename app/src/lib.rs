@@ -9,8 +9,8 @@ mod sync;
 use crypto::CryptoEngine;
 use repository::automerge::AutomergeTodoRepo;
 use repository::TodoRepository;
-use store::FileBackingStore;
 use std::sync::Arc;
+use store::FileBackingStore;
 use tauri::Manager;
 
 pub struct AppState {

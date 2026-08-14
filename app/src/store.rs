@@ -21,9 +21,7 @@ pub struct FileBackingStore {
 
 impl FileBackingStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
-        }
+        Self { path: path.into() }
     }
 }
 
@@ -41,7 +39,9 @@ impl BackingStore for FileBackingStore {
     async fn save(&self, data: &[u8]) -> Result<(), String> {
         if let Some(parent) = self.path.parent() {
             if !parent.exists() {
-                fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+                fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
         }
         fs::write(&self.path, data).await.map_err(|e| e.to_string())
@@ -103,7 +103,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_backing_store() {
-        let test_path = std::env::temp_dir().join(format!("test_store_{}.bin", uuid::Uuid::new_v4()));
+        let test_path =
+            std::env::temp_dir().join(format!("test_store_{}.bin", uuid::Uuid::new_v4()));
 
         let store = FileBackingStore::new(&test_path);
         assert_eq!(store.load().await.unwrap(), None);

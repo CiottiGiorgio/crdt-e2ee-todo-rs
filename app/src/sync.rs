@@ -31,12 +31,13 @@ pub fn start_sync_worker(
                     let mut highest_observed_seq: u64 = 0;
                     let mut missing_deltas: BTreeSet<u64> = BTreeSet::new();
 
-                    let get_highest_continuous_seq = |highest_observed: u64, missing: &BTreeSet<u64>| -> u64 {
-                        match missing.iter().next() {
-                            Some(&lowest_missing) => lowest_missing.saturating_sub(1),
-                            None => highest_observed,
-                        }
-                    };
+                    let get_highest_continuous_seq =
+                        |highest_observed: u64, missing: &BTreeSet<u64>| -> u64 {
+                            match missing.iter().next() {
+                                Some(&lowest_missing) => lowest_missing.saturating_sub(1),
+                                None => highest_observed,
+                            }
+                        };
 
                     // Periodic snapshot timer (e.g. every 5 minutes)
                     let mut snapshot_interval =

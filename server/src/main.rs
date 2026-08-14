@@ -74,7 +74,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Send Ack message immediately with current highest seq_id straight from SQLite
     let highest_seq_id = state.store.get_highest_seq_id().await.unwrap_or(0);
-    let _ = direct_tx.send(ServerMessage::Ack { seq_id: highest_seq_id });
+    let _ = direct_tx.send(ServerMessage::Ack {
+        seq_id: highest_seq_id,
+    });
 
     // Spawn task to forward messages to the WebSocket
     let send_task = tokio::spawn(async move {
