@@ -1,13 +1,13 @@
+mod automerge;
 mod commands;
 mod constants;
 mod crypto;
 mod models;
-mod repository;
 pub mod store;
 mod sync;
 
+use automerge::AutomergeTodoRepo;
 use crypto::CryptoEngine;
-use repository::AutomergeTodoRepo;
 use std::sync::Arc;
 use store::SqliteBackingStore;
 use tauri::Manager;

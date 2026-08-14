@@ -1,6 +1,6 @@
 use crate::constants::SNAPSHOT_INTERVAL_MINUTES;
 use crate::crypto::CryptoEngine;
-use crate::repository::AutomergeTodoRepo;
+use crate::automerge::AutomergeTodoRepo;
 use crate::store::SqliteBackingStore;
 use automerge::AutoCommit;
 use futures_util::{SinkExt, StreamExt};
