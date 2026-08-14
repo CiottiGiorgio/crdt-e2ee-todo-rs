@@ -1,35 +1,29 @@
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ObjType, ReadDoc, ScalarValue, Value};
-use std::path::PathBuf;
 use std::sync::RwLock;
 use uuid::Uuid;
 
 use crate::models::{TodoItem, TodoStatus};
 use crate::repository::TodoRepository;
+use crate::store::BackingStore;
 
 pub struct AutomergeTodoRepo {
     doc: RwLock<AutoCommit>,
-    file_path: Option<PathBuf>,
+    store: Box<dyn BackingStore>,
     sync_tx: RwLock<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
 }
 
 impl AutomergeTodoRepo {
-    pub fn new(file_path: Option<PathBuf>) -> Result<Self, String> {
-        let doc = if let Some(ref path) = file_path {
-            if path.exists() {
-                let data = std::fs::read(path).map_err(|e| e.to_string())?;
-                AutoCommit::load(&data)
-                    .map_err(|e| format!("Failed to load automerge doc: {}", e))?
-            } else {
-                AutoCommit::new()
-            }
-        } else {
-            AutoCommit::new()
+    pub async fn new(store: Box<dyn BackingStore>) -> Result<Self, String> {
+        let doc = match store.load().await? {
+            Some(data) => AutoCommit::load(&data)
+                .map_err(|e| format!("Failed to load automerge doc: {}", e))?,
+            None => AutoCommit::new(),
         };
 
         Ok(Self {
             doc: RwLock::new(doc),
-            file_path,
+            store,
             sync_tx: RwLock::new(None),
         })
     }
@@ -48,10 +42,13 @@ impl AutomergeTodoRepo {
         }
     }
 
-    pub fn merge_incoming(&self, incoming: &mut AutoCommit) -> Result<(), String> {
-        let mut doc = self.doc.write().map_err(|e| e.to_string())?;
-        doc.merge(incoming).map_err(|e| e.to_string())?;
-        self.save_to_disk(&mut doc)?;
+    pub async fn merge_incoming(&self, incoming: &mut AutoCommit) -> Result<(), String> {
+        let data = {
+            let mut doc = self.doc.write().map_err(|e| e.to_string())?;
+            doc.merge(incoming).map_err(|e| e.to_string())?;
+            doc.save()
+        };
+        self.store.save(&data).await?;
         // Intentionally NOT calling notify_change here to prevent infinite broadcast loops
         Ok(())
     }
@@ -64,16 +61,8 @@ impl AutomergeTodoRepo {
         }
     }
 
-    fn save_to_disk(&self, doc: &mut AutoCommit) -> Result<(), String> {
-        if let Some(ref path) = self.file_path {
-            let data = doc.save();
-            std::fs::write(path, data).map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    }
-
-    fn save_local_change(&self, doc: &mut AutoCommit) -> Result<(), String> {
-        self.save_to_disk(doc)?;
+    async fn save_local_change(&self, doc_bytes: &[u8]) -> Result<(), String> {
+        self.store.save(doc_bytes).await?;
         self.notify_change();
         Ok(())
     }
@@ -137,37 +126,46 @@ impl TodoRepository for AutomergeTodoRepo {
     }
 
     async fn add(&self, text: String) -> Result<TodoItem, String> {
-        let mut doc = self.doc.write().map_err(|e| e.to_string())?;
+        let (id, status, doc_bytes) = {
+            let mut doc = self.doc.write().map_err(|e| e.to_string())?;
 
-        let id = Uuid::new_v4().to_string();
-        let item_obj = doc
-            .put_object(automerge::ROOT, &id, ObjType::Map)
-            .map_err(|e| e.to_string())?;
+            let id = Uuid::new_v4().to_string();
+            let item_obj = doc
+                .put_object(automerge::ROOT, &id, ObjType::Map)
+                .map_err(|e| e.to_string())?;
 
-        let status = TodoStatus::WorkingSet;
-        doc.put(&item_obj, "text", text.as_str())
-            .map_err(|e| e.to_string())?;
-        doc.put(&item_obj, "status", Self::status_to_str(status))
-            .map_err(|e| e.to_string())?;
+            let status = TodoStatus::WorkingSet;
+            doc.put(&item_obj, "text", text.as_str())
+                .map_err(|e| e.to_string())?;
+            doc.put(&item_obj, "status", Self::status_to_str(status))
+                .map_err(|e| e.to_string())?;
 
-        self.save_local_change(&mut doc)?;
+            let bytes = doc.save();
+            (id, status, bytes)
+        };
+
+        self.save_local_change(&doc_bytes).await?;
 
         Ok(TodoItem { id, text, status })
     }
 
     async fn update_status(&self, id: String, status: TodoStatus) -> Result<(), String> {
-        let mut doc = self.doc.write().map_err(|e| e.to_string())?;
+        let doc_bytes = {
+            let mut doc = self.doc.write().map_err(|e| e.to_string())?;
 
-        if let Some((Value::Object(ObjType::Map), item_obj)) =
-            doc.get(automerge::ROOT, &id).map_err(|e| e.to_string())?
-        {
-            doc.put(&item_obj, "status", Self::status_to_str(status))
-                .map_err(|e| e.to_string())?;
-            self.save_local_change(&mut doc)?;
-            Ok(())
-        } else {
-            Err(format!("Todo item with id {} not found", id))
-        }
+            if let Some((Value::Object(ObjType::Map), item_obj)) =
+                doc.get(automerge::ROOT, &id).map_err(|e| e.to_string())?
+            {
+                doc.put(&item_obj, "status", Self::status_to_str(status))
+                    .map_err(|e| e.to_string())?;
+                doc.save()
+            } else {
+                return Err(format!("Todo item with id {} not found", id));
+            }
+        };
+
+        self.save_local_change(&doc_bytes).await?;
+        Ok(())
     }
 
     async fn delete(&self, id: String) -> Result<(), String> {
@@ -178,14 +176,17 @@ impl TodoRepository for AutomergeTodoRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::InMemoryBackingStore;
 
-    fn setup_repo() -> AutomergeTodoRepo {
-        AutomergeTodoRepo::new(None).expect("Failed to initialize in-memory Automerge repo")
+    async fn setup_repo() -> AutomergeTodoRepo {
+        AutomergeTodoRepo::new(Box::new(InMemoryBackingStore::new()))
+            .await
+            .expect("Failed to initialize in-memory Automerge repo")
     }
 
     #[tokio::test]
     async fn test_add_todo_and_get_all() {
-        let repo = setup_repo();
+        let repo = setup_repo().await;
 
         let added = repo
             .add("Test writing Automerge tests".to_string())
@@ -201,7 +202,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_update_status() {
-        let repo = setup_repo();
+        let repo = setup_repo().await;
 
         let todo = repo.add("Buy groceries".to_string()).await.unwrap();
         repo.update_status(todo.id.clone(), TodoStatus::Completed)
@@ -214,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_is_soft_delete() {
-        let repo = setup_repo();
+        let repo = setup_repo().await;
 
         let todo = repo.add("To be deleted".to_string()).await.unwrap();
         repo.delete(todo.id.clone()).await.unwrap();
@@ -225,8 +226,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_sync() {
-        let repo1 = setup_repo();
-        let repo2 = setup_repo();
+        let repo1 = setup_repo().await;
+        let repo2 = setup_repo().await;
 
         let _todo1 = repo1.add("From repo 1".to_string()).await.unwrap();
         let _todo2 = repo2.add("From repo 2".to_string()).await.unwrap();

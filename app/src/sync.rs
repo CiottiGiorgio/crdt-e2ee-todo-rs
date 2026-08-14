@@ -1,15 +1,14 @@
-use crate::constants::{SNAPSHOT_INTERVAL_MINUTES, SYNC_DEBOUNCE_MS};
+use crate::constants::SNAPSHOT_INTERVAL_MINUTES;
 use crate::crypto::CryptoEngine;
 use crate::repository::automerge::AutomergeTodoRepo;
 use automerge::AutoCommit;
 use futures_util::{SinkExt, StreamExt};
 use shared::{ClientMessage, ServerMessage};
 use std::collections::BTreeSet;
-use std::pin::Pin;
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::mpsc;
-use tokio::time::{interval, sleep, Duration, Sleep};
+use tokio::time::{interval, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 pub fn start_sync_worker(
@@ -38,8 +37,6 @@ pub fn start_sync_worker(
                             None => highest_observed,
                         }
                     };
-
-                    let mut debounce_timer: Option<Pin<Box<Sleep>>> = None;
 
                     // Periodic snapshot timer (e.g. every 5 minutes)
                     let mut snapshot_interval =
@@ -73,33 +70,6 @@ pub fn start_sync_worker(
                                 }
                             }
 
-                            // Debounce timer completion for local changes
-                            _ = async {
-                                match debounce_timer.as_mut() {
-                                    Some(timer) => timer.await,
-                                    None => futures_util::future::pending().await,
-                                }
-                            } => {
-                                debounce_timer = None;
-                                let local_bytes = repo.get_doc_bytes();
-                                if !local_bytes.is_empty() {
-                                    if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
-                                        let client_msg = ClientMessage::Delta {
-                                            seq_id: None,
-                                            payload: encrypted_payload,
-                                        };
-                                        if let Ok(json) = serde_json::to_string(&client_msg) {
-                                            if write.send(Message::Text(json.into())).await.is_err() {
-                                                eprintln!("Failed to push debounced update to server");
-                                                break;
-                                            } else {
-                                                println!("Pushed debounced local delta update to server!");
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
                             // Incoming message from server
                             Some(msg) = read.next() => {
                                 match msg {
@@ -118,7 +88,7 @@ pub fn start_sync_worker(
 
                                                     if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {
                                                         if let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) {
-                                                            if repo.merge_incoming(&mut incoming_doc).is_ok() {
+                                                            if repo.merge_incoming(&mut incoming_doc).await.is_ok() {
                                                                 println!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
                                                                 let _ = app_handle.emit("todos-updated", ());
                                                             }
@@ -138,7 +108,7 @@ pub fn start_sync_worker(
 
                                                         if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {
                                                             if let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) {
-                                                                if repo.merge_incoming(&mut incoming_doc).is_ok() {
+                                                                if repo.merge_incoming(&mut incoming_doc).await.is_ok() {
                                                                     merged_any = true;
                                                                 }
                                                             }
@@ -195,8 +165,23 @@ pub fn start_sync_worker(
 
                             // Local change notification triggered from Tauri command
                             Some(_) = rx.recv() => {
-                                // Reset/start the debouncing timer
-                                debounce_timer = Some(Box::pin(sleep(Duration::from_millis(SYNC_DEBOUNCE_MS))));
+                                let local_bytes = repo.get_doc_bytes();
+                                if !local_bytes.is_empty() {
+                                    if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
+                                        let client_msg = ClientMessage::Delta {
+                                            seq_id: None,
+                                            payload: encrypted_payload,
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&client_msg) {
+                                            if write.send(Message::Text(json.into())).await.is_err() {
+                                                eprintln!("Failed to push local delta update to server");
+                                                break;
+                                            } else {
+                                                println!("Pushed local delta update immediately to server!");
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -209,7 +194,7 @@ pub fn start_sync_worker(
                 }
             }
 
-            sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
 

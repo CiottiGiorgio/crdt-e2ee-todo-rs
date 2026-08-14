@@ -3,11 +3,13 @@ mod constants;
 mod crypto;
 mod models;
 mod repository;
+pub mod store;
 mod sync;
 
 use crypto::CryptoEngine;
 use repository::automerge::AutomergeTodoRepo;
 use repository::TodoRepository;
+use store::FileBackingStore;
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -43,8 +45,9 @@ pub fn run() {
             let doc_path = app_data_dir.join(constants::AUTOMERGE_FILE_NAME);
             println!("Initializing Automerge document at: {:?}", doc_path);
 
+            let store = FileBackingStore::new(doc_path);
             let repo = Arc::new(
-                AutomergeTodoRepo::new(Some(doc_path))
+                tauri::async_runtime::block_on(AutomergeTodoRepo::new(Box::new(store)))
                     .expect("failed to initialize automerge repository"),
             );
 
