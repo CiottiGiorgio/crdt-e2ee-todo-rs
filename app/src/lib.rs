@@ -12,6 +12,7 @@ use repository::TodoRepository;
 use std::sync::Arc;
 use tauri::Manager;
 
+#[cfg(not(debug_assertions))]
 use tracing::info;
 
 pub struct AppState {
@@ -42,10 +43,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             #[cfg(debug_assertions)]
-            let database_url = "sqlite::memory:".to_string();
+            let store = tauri::async_runtime::block_on(store::SqliteBackingStore::in_memory())
+                .expect("failed to initialize in-memory sqlite backing store");
 
             #[cfg(not(debug_assertions))]
-            let database_url = {
+            let store = {
                 let app_data_dir = app
                     .path()
                     .app_data_dir()
@@ -57,17 +59,9 @@ pub fn run() {
                 }
 
                 let db_path = app_data_dir.join("store.db");
-                format!("sqlite://{}?mode=rwc", db_path.display())
+                tauri::async_runtime::block_on(store::SqliteBackingStore::from_path(db_path))
+                    .expect("failed to initialize sqlite backing store")
             };
-
-            info!("Connecting to SQLite database at: {}", database_url);
-
-            let pool = tauri::async_runtime::block_on(
-                sqlx::sqlite::SqlitePoolOptions::new().connect(&database_url),
-            )
-            .expect("Failed to connect to SQLite with sqlx");
-
-            let store = tauri::async_runtime::block_on(store::SqliteBackingStore::new(pool));
 
             let repo = Arc::new(
                 tauri::async_runtime::block_on(AutomergeTodoRepo::new(store))

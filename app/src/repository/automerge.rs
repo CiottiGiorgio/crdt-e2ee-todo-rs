@@ -190,14 +190,11 @@ impl TodoRepository for AutomergeTodoRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::SqliteBackingStore;
-
     async fn setup_repo() -> AutomergeTodoRepo {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .connect("sqlite::memory:")
+        let store = SqliteBackingStore::in_memory()
             .await
-            .expect("Failed to connect to SQLite with sqlx");
-        AutomergeTodoRepo::new(SqliteBackingStore::new(pool).await)
+            .expect("Failed to initialize in-memory SQLite store");
+        AutomergeTodoRepo::new(store)
             .await
             .expect("Failed to initialize in-memory Automerge repo")
     }

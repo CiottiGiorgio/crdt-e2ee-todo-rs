@@ -1,20 +1,46 @@
+use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 use std::collections::BTreeSet;
+use std::path::Path;
 
 /// SQLite-backed store for binary document data (e.g., Automerge documents)
-/// and synchronization metadata.
+/// and synchronization metadata. Supports both in-memory and file-backed databases.
 pub struct SqliteBackingStore {
     pool: SqlitePool,
 }
 
 impl SqliteBackingStore {
-    pub async fn new(pool: SqlitePool) -> Self {
+    /// Creates an in-memory SQLite store (useful for debug and tests).
+    pub async fn in_memory() -> Result<Self, String> {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .map_err(|e| format!("Failed to connect to in-memory SQLite: {}", e))?;
+
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await
-            .expect("Failed to run database migrations");
+            .map_err(|e| format!("Failed to run database migrations: {}", e))?;
 
-        Self { pool }
+        Ok(Self { pool })
+    }
+
+    /// Creates a file-backed SQLite store at the specified path.
+    pub async fn from_path(db_path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = db_path.as_ref();
+        let database_url = format!("sqlite://{}?mode=rwc", path.display());
+
+        let pool = SqlitePoolOptions::new()
+            .connect(&database_url)
+            .await
+            .map_err(|e| format!("Failed to connect to SQLite at {}: {}", path.display(), e))?;
+
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .map_err(|e| format!("Failed to run database migrations: {}", e))?;
+
+        Ok(Self { pool })
     }
 
     /// Loads document bytes from the store.
@@ -82,15 +108,10 @@ impl SqliteBackingStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
 
     #[tokio::test]
-    async fn test_sqlite_store() {
-        let pool = SqlitePoolOptions::new()
-            .connect("sqlite::memory:")
-            .await
-            .expect("Failed to connect to SQLite with sqlx");
-        let store = SqliteBackingStore::new(pool).await;
+    async fn test_sqlite_store_in_memory() {
+        let store = SqliteBackingStore::in_memory().await.unwrap();
         assert_eq!(store.load().await.unwrap(), None);
 
         let data = vec![1, 2, 3, 4];
@@ -105,5 +126,12 @@ mod tests {
         store.save_sync_state(5, &missing).await.unwrap();
 
         assert_eq!(store.get_sync_state().await.unwrap(), (5, missing));
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_store_fails_if_folder_does_not_exist() {
+        let nonexistent_path = "/nonexistent_folder_12345/store.db";
+        let result = SqliteBackingStore::from_path(nonexistent_path).await;
+        assert!(result.is_err());
     }
 }
