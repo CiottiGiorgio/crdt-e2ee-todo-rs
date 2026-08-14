@@ -1,9 +1,15 @@
-use crate::constants::SNAPSHOT_INTERVAL_MINUTES;
-use crate::crypto::CryptoEngine;
+mod constants;
+mod helper;
+
 use crate::automerge::AutomergeTodoRepo;
+use crate::crypto::CryptoEngine;
 use crate::store::SqliteBackingStore;
-use automerge::AutoCommit;
-use futures_util::{SinkExt, StreamExt};
+use constants::{RECONNECT_DELAY_SECS, SNAPSHOT_INTERVAL_MINUTES, WS_URL};
+use futures_util::StreamExt;
+use helper::{
+    decrypt_merge_and_persist, get_encrypted_local_doc, get_highest_continuous_seq,
+    record_observed_seq, request_sync_if_missing, send_client_message,
+};
 use shared::{ClientMessage, ServerMessage};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -13,209 +19,136 @@ use tokio::time::{interval, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
 
-fn get_highest_continuous_seq(highest_observed: u64, missing: &BTreeSet<u64>) -> u64 {
-    match missing.first() {
-        Some(&lowest_missing) => lowest_missing.saturating_sub(1),
-        None => highest_observed,
-    }
-}
-
-fn record_observed_seq(
-    seq_id: u64,
-    highest_observed_seq: &mut u64,
-    missing_deltas: &mut BTreeSet<u64>,
-) {
-    if seq_id > *highest_observed_seq {
-        for seq in (*highest_observed_seq + 1)..=seq_id {
-            missing_deltas.insert(seq);
-        }
-        *highest_observed_seq = seq_id;
-    }
-}
-
-pub fn start_sync_worker(
+pub async fn sync_engine(
     repo: Arc<AutomergeTodoRepo>,
     crypto: Arc<CryptoEngine>,
     store: Arc<SqliteBackingStore>,
     app_handle: tauri::AppHandle,
-) -> mpsc::UnboundedSender<()> {
-    let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+    mut rx: mpsc::UnboundedReceiver<()>,
+) {
+    loop {
+        info!("Attempting to connect to sync server at {}", WS_URL);
+        let Ok((ws_stream, _)) = connect_async(WS_URL).await.map_err(|e| {
+            warn!(
+                "Sync server not available ({}). Retrying in {} seconds...",
+                e, RECONNECT_DELAY_SECS
+            );
+        }) else {
+            tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+            continue;
+        };
 
-    tauri::async_runtime::spawn(async move {
-        let ws_url = "ws://127.0.0.1:3000/ws";
+        info!("Connected to sync server!");
+        let (mut write, mut read) = ws_stream.split();
+
+        let mut highest_observed_seq: u64 = 0;
+        let mut missing_deltas: BTreeSet<u64> = BTreeSet::new();
+
+        if let Ok((highest, missing)) = store.get_sync_state().await {
+            highest_observed_seq = highest;
+            missing_deltas = missing;
+        }
+
+        // Periodic snapshot timer (e.g. every 5 minutes)
+        let mut snapshot_interval = interval(Duration::from_secs(SNAPSHOT_INTERVAL_MINUTES * 60));
+        // Skip the immediate first tick on connection
+        snapshot_interval.tick().await;
 
         loop {
-            info!("Attempting to connect to sync server at {}", ws_url);
-            match connect_async(ws_url).await {
-                Ok((ws_stream, _)) => {
-                    info!("Connected to sync server!");
-                    let (mut write, mut read) = ws_stream.split();
-
-                    let mut highest_observed_seq: u64 = 0;
-                    let mut missing_deltas: BTreeSet<u64> = BTreeSet::new();
-
-                    if let Ok((highest, missing)) = store.get_sync_state().await {
-                        highest_observed_seq = highest;
-                        missing_deltas = missing;
+            tokio::select! {
+                // Periodic Snapshot Timer Triggered
+                _ = snapshot_interval.tick() => {
+                    let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
+                    // A snapshot can ONLY be uploaded if we are fully caught up without any missing holes
+                    if missing_deltas.is_empty() && continuous_seq > 0 {
+                        if let Some(payload) = get_encrypted_local_doc(&repo, &crypto) {
+                            let client_msg = ClientMessage::Snapshot {
+                                covers_seq_id: continuous_seq,
+                                payload,
+                            };
+                            if send_client_message(&mut write, &client_msg).await.is_ok() {
+                                info!("Pushed periodic snapshot (covers seq_id: {}) to server!", continuous_seq);
+                            }
+                        }
+                    } else {
+                        debug!("Skipping periodic snapshot: missing_deltas has {} holes, continuous_seq={}", missing_deltas.len(), continuous_seq);
                     }
+                }
 
-                    // Periodic snapshot timer (e.g. every 5 minutes)
-                    let mut snapshot_interval =
-                        interval(Duration::from_secs(SNAPSHOT_INTERVAL_MINUTES * 60));
-                    // Skip the immediate first tick on connection
-                    snapshot_interval.tick().await;
+                // Incoming message from server
+                Some(msg) = read.next() => {
+                    match msg {
+                        Ok(Message::Text(text)) => {
+                            if let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) {
+                                match server_msg {
+                                    ServerMessage::Snapshot { seq_id, payload } => {
+                                        record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
 
-                    loop {
-                        tokio::select! {
-                            // Periodic Snapshot Timer Triggered
-                            _ = snapshot_interval.tick() => {
-                                let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
-                                // A snapshot can ONLY be uploaded if we are fully caught up without any missing holes
-                                if missing_deltas.is_empty() && continuous_seq > 0 {
-                                    let local_bytes = repo.get_doc_bytes();
-                                    if !local_bytes.is_empty() {
-                                        if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
-                                            let client_msg = ClientMessage::Snapshot {
-                                                covers_seq_id: continuous_seq,
-                                                payload: encrypted_payload,
-                                            };
-                                            if let Ok(json) = serde_json::to_string(&client_msg) {
-                                                if write.send(Message::Text(json.into())).await.is_ok() {
-                                                    info!("Pushed periodic snapshot (covers seq_id: {}) to server!", continuous_seq);
-                                                }
-                                            }
+                                        if decrypt_merge_and_persist(&repo, &crypto, &store, &payload).await {
+                                            missing_deltas.retain(|&s| s > seq_id);
+                                            info!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
+                                            let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
+                                            let _ = app_handle.emit("todos-updated", ());
                                         }
                                     }
-                                } else {
-                                    debug!("Skipping periodic snapshot: missing_deltas has {} holes, continuous_seq={}", missing_deltas.len(), continuous_seq);
-                                }
-                            }
+                                    ServerMessage::DeltaBatch { deltas } => {
+                                        let mut merged_any = false;
+                                        for (seq_id, payload) in deltas {
+                                            record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
 
-                            // Incoming message from server
-                            Some(msg) = read.next() => {
-                                match msg {
-                                    Ok(Message::Text(text)) => {
-                                        if let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) {
-                                            match server_msg {
-                                                ServerMessage::Snapshot { seq_id, payload } => {
-                                                    record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
-
-                                                    if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {
-                                                        if let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) {
-                                                            if let Ok(merged_bytes) = repo.merge_incoming(&mut incoming_doc) {
-                                                                if let Ok(encrypted_merged) = crypto.encrypt(&merged_bytes) {
-                                                                    if let Ok(bytes) = serde_json::to_vec(&encrypted_merged) {
-                                                                        let _ = store.save(&bytes).await;
-                                                                    }
-                                                                }
-                                                                missing_deltas.retain(|&s| s > seq_id);
-                                                                info!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
-                                                                let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
-                                                                let _ = app_handle.emit("todos-updated", ());
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                ServerMessage::DeltaBatch { deltas } => {
-                                                    let mut merged_any = false;
-                                                    for (seq_id, payload) in deltas {
-                                                        record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
-
-                                                        if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {
-                                                            if let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) {
-                                                                if let Ok(merged_bytes) = repo.merge_incoming(&mut incoming_doc) {
-                                                                    if let Ok(encrypted_merged) = crypto.encrypt(&merged_bytes) {
-                                                                        if let Ok(bytes) = serde_json::to_vec(&encrypted_merged) {
-                                                                            let _ = store.save(&bytes).await;
-                                                                        }
-                                                                    }
-                                                                    merged_any = true;
-                                                                    // Only mark delta as satisfied if decrypt & merge succeeded
-                                                                    missing_deltas.remove(&seq_id);
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-
-                                                    let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
-
-                                                    if merged_any {
-                                                        info!("Successfully merged incoming DeltaBatch");
-                                                        let _ = app_handle.emit("todos-updated", ());
-                                                    }
-
-                                                    if !missing_deltas.is_empty() {
-                                                        let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
-                                                        let req_sync = ClientMessage::RequestSync {
-                                                            from_seq_id: continuous_seq,
-                                                        };
-                                                        if let Ok(json) = serde_json::to_string(&req_sync) {
-                                                            let _ = write.send(Message::Text(json.into())).await;
-                                                        }
-                                                    }
-                                                }
-                                                ServerMessage::Ack { seq_id } => {
-                                                    record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
-                                                    // Ack indicates a sequence ID position confirmed by server
-                                                    missing_deltas.remove(&seq_id);
-                                                    let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
-
-                                                    let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
-                                                    debug!("Received Ack from server for seq_id: {} (continuous_seq: {})", seq_id, continuous_seq);
-
-                                                    if !missing_deltas.is_empty() {
-                                                        let req_sync = ClientMessage::RequestSync {
-                                                            from_seq_id: continuous_seq,
-                                                        };
-                                                        if let Ok(json) = serde_json::to_string(&req_sync) {
-                                                            let _ = write.send(Message::Text(json.into())).await;
-                                                        }
-                                                    }
-                                                }
+                                            if decrypt_merge_and_persist(&repo, &crypto, &store, &payload).await {
+                                                merged_any = true;
+                                                // Only mark delta as satisfied if decrypt & merge succeeded
+                                                missing_deltas.remove(&seq_id);
                                             }
                                         }
-                                    }
-                                    Ok(Message::Close(_)) | Err(_) => {
-                                        warn!("Server WebSocket connection closed");
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
 
-                            // Local change notification triggered from Tauri command
-                            Some(_) = rx.recv() => {
-                                let local_bytes = repo.get_doc_bytes();
-                                if !local_bytes.is_empty() {
-                                    if let Ok(encrypted_payload) = crypto.encrypt(&local_bytes) {
-                                        let client_msg = ClientMessage::Delta {
-                                            payload: encrypted_payload,
-                                        };
-                                        if let Ok(json) = serde_json::to_string(&client_msg) {
-                                            if write.send(Message::Text(json.into())).await.is_err() {
-                                                error!("Failed to push local delta update to server");
-                                                break;
-                                            } else {
-                                                info!("Pushed local delta update immediately to server!");
-                                            }
+                                        let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
+
+                                        if merged_any {
+                                            info!("Successfully merged incoming DeltaBatch");
+                                            let _ = app_handle.emit("todos-updated", ());
                                         }
+
+                                        request_sync_if_missing(&mut write, highest_observed_seq, &missing_deltas).await;
+                                    }
+                                    ServerMessage::Ack { seq_id } => {
+                                        record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
+                                        // Ack indicates a sequence ID position confirmed by server
+                                        missing_deltas.remove(&seq_id);
+                                        let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
+
+                                        let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
+                                        debug!("Received Ack from server for seq_id: {} (continuous_seq: {})", seq_id, continuous_seq);
+
+                                        request_sync_if_missing(&mut write, highest_observed_seq, &missing_deltas).await;
                                     }
                                 }
                             }
                         }
+                        Ok(Message::Close(_)) | Err(_) => {
+                            warn!("Server WebSocket connection closed");
+                            break;
+                        }
+                        _ => {}
                     }
                 }
-                Err(e) => {
-                    warn!(
-                        "Sync server not available ({}). Retrying in 5 seconds...",
-                        e
-                    );
+
+                // Local change notification triggered from Tauri command
+                Some(_) = rx.recv() => {
+                    if let Some(payload) = get_encrypted_local_doc(&repo, &crypto) {
+                        let client_msg = ClientMessage::Delta { payload };
+                        if send_client_message(&mut write, &client_msg).await.is_err() {
+                            error!("Failed to push local delta update to server");
+                            break;
+                        } else {
+                            info!("Pushed local delta update immediately to server!");
+                        }
+                    }
                 }
             }
-
-            tokio::time::sleep(Duration::from_secs(5)).await;
         }
-    });
 
-    tx
+        tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+    }
 }

@@ -89,12 +89,14 @@ pub fn run() {
                     .expect("failed to initialize automerge repository"),
             );
 
-            let sync_tx = sync::start_sync_worker(
+            let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
+            tauri::async_runtime::spawn(sync::sync_engine(
                 repo.clone(),
                 crypto.clone(),
                 store.clone(),
                 app.handle().clone(),
-            );
+                sync_rx,
+            ));
 
             app.manage(AppState {
                 repo,

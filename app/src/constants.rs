@@ -4,7 +4,6 @@ use aes_gcm::Aes256Gcm;
 
 #[allow(dead_code)]
 pub const AUTOMERGE_FILE_NAME: &str = "todo.automerge";
-pub const SNAPSHOT_INTERVAL_MINUTES: u64 = 5;
 
 /// AES-256 Key size in bytes, derived directly from Aes256Gcm
 pub const KEY_SIZE: usize = <Aes256Gcm as KeySizeUser>::KeySize::USIZE;
