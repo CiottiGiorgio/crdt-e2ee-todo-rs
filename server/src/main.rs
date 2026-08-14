@@ -183,7 +183,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                         }
                         Ok(false) => {
                             info!(
-                                "Rejected stale Snapshot from Client {} (covers {}, current is >=)",
+                                "Rejected Snapshot from Client {} (covers seq_id: {}, which does not strictly advance current snapshot or exceeds released seq_id)",
                                 my_client_id, covers_seq_id
                             );
                         }

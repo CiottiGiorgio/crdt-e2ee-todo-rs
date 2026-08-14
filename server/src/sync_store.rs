@@ -87,6 +87,11 @@ impl SqliteSyncStore {
         covers_seq_id: u64,
         payload: &EncryptedPayload,
     ) -> Result<bool, sqlx::Error> {
+        let server_highest_seq = self.get_highest_seq_id().await.unwrap_or(0);
+        if covers_seq_id > server_highest_seq {
+            return Ok(false);
+        }
+
         let current_snap_seq: u64 =
             sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(seq_id), 0) FROM snapshot")
                 .fetch_one(&self.pool)
@@ -94,7 +99,7 @@ impl SqliteSyncStore {
                 .map(|v| v as u64)
                 .unwrap_or(0);
 
-        if covers_seq_id >= current_snap_seq {
+        if covers_seq_id > current_snap_seq {
             let mut tx = self.pool.begin().await?;
             sqlx::query(
                 "INSERT OR REPLACE INTO snapshot (id, seq_id, ciphertext, nonce) VALUES (1, ?, ?, ?)",
