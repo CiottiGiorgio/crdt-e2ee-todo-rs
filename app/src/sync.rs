@@ -13,7 +13,7 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{debug, error, info, warn};
 
 fn get_highest_continuous_seq(highest_observed: u64, missing: &BTreeSet<u64>) -> u64 {
-    match missing.iter().next() {
+    match missing.first() {
         Some(&lowest_missing) => lowest_missing.saturating_sub(1),
         None => highest_observed,
     }
