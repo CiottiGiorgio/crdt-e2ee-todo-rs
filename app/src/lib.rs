@@ -69,7 +69,7 @@ pub fn run() {
             let store = Arc::new(store);
 
             // Shared E2EE Symmetric Key (32 bytes)
-            let master_key = [42u8; 32];
+            let master_key = [42u8; constants::KEY_SIZE];
             let crypto = Arc::new(CryptoEngine::new(&master_key));
 
             let encrypted_data = tauri::async_runtime::block_on(store.load())

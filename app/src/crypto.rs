@@ -1,7 +1,8 @@
+use crate::constants::{IV_SIZE, KEY_SIZE};
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use rand::Rng;
-use shared::{EncryptedPayload, IV_SIZE, KEY_SIZE};
+use shared::EncryptedPayload;
 
 pub struct CryptoEngine {
     cipher: Aes256Gcm,
