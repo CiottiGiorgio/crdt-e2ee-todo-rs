@@ -35,27 +35,33 @@ pub fn record_observed_seq(
     }
 }
 
+async fn try_decrypt_merge_and_persist(
+    repo: &AutomergeTodoRepo,
+    crypto: &CryptoEngine,
+    store: &SqliteBackingStore,
+    payload: &EncryptedPayload,
+) -> Result<(), String> {
+    let decrypted_bytes = crypto.decrypt(payload)?;
+    let mut incoming_doc = AutoCommit::load(&decrypted_bytes).map_err(|e| e.to_string())?;
+    let merged_bytes = repo.merge_incoming(&mut incoming_doc).map_err(|e| e.to_string())?;
+    let encrypted_merged = crypto.encrypt(&merged_bytes)?;
+    let bytes = serde_json::to_vec(&encrypted_merged).map_err(|e| e.to_string())?;
+    store.save(&bytes).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub async fn decrypt_merge_and_persist(
     repo: &AutomergeTodoRepo,
     crypto: &CryptoEngine,
     store: &SqliteBackingStore,
     payload: &EncryptedPayload,
 ) -> bool {
-    let Ok(decrypted_bytes) = crypto.decrypt(payload) else {
-        return false;
-    };
-    let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) else {
-        return false;
-    };
-    let Ok(merged_bytes) = repo.merge_incoming(&mut incoming_doc) else {
-        return false;
-    };
-    if let Ok(encrypted_merged) = crypto.encrypt(&merged_bytes) {
-        if let Ok(bytes) = serde_json::to_vec(&encrypted_merged) {
-            let _ = store.save(&bytes).await;
-        }
+    if let Err(e) = try_decrypt_merge_and_persist(repo, crypto, store, payload).await {
+        tracing::error!("Failed to decrypt, merge, or persist payload: {}", e);
+        false
+    } else {
+        true
     }
-    true
 }
 
 pub fn get_encrypted_local_doc(
@@ -69,17 +75,16 @@ pub fn get_encrypted_local_doc(
     crypto.encrypt(&local_bytes).ok()
 }
 
-pub async fn send_client_message<S>(
-    write: &mut S,
-    msg: &ClientMessage,
-) -> Result<(), S::Error>
+pub async fn send_client_message<S>(write: &mut S, msg: &ClientMessage) -> Result<(), S::Error>
 where
     S: SinkExt<Message> + Unpin,
 {
-    if let Ok(json) = serde_json::to_string(msg) {
-        write.send(Message::Text(json.into())).await
-    } else {
-        Ok(())
+    match serde_json::to_string(msg) {
+        Ok(json) => write.send(Message::Text(json.into())).await,
+        Err(e) => {
+            tracing::error!("Failed to serialize ClientMessage to JSON: {}", e);
+            Ok(())
+        }
     }
 }
 

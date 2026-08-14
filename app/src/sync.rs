@@ -30,14 +30,16 @@ pub async fn sync_engine(
 ) {
     loop {
         info!("Attempting to connect to sync server at {}", WS_URL);
-        let Ok((ws_stream, _)) = connect_async(WS_URL).await.map_err(|e| {
-            warn!(
-                "Sync server not available ({}). Retrying in {} seconds...",
-                e, RECONNECT_DELAY_SECS
-            );
-        }) else {
-            tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
-            continue;
+        let (ws_stream, _) = match connect_async(WS_URL).await {
+            Ok(res) => res,
+            Err(e) => {
+                warn!(
+                    "Sync server not available ({}). Retrying in {} seconds...",
+                    e, RECONNECT_DELAY_SECS
+                );
+                tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+                continue;
+            }
         };
 
         info!("Connected to sync server!");
@@ -46,6 +48,9 @@ pub async fn sync_engine(
         let mut highest_observed_seq: u64 = 0;
         let mut missing_deltas: BTreeSet<u64> = BTreeSet::new();
 
+        // TODO: I think we want to let errors fall through here? At least log that we couldn't
+        //  get this information. Perhaps if we can't talk to sqlite this is unrecoverable
+        //  and we should shut down the sync engine.
         if let Ok((highest, missing)) = store.get_sync_state().await {
             highest_observed_seq = highest;
             missing_deltas = missing;
@@ -67,6 +72,107 @@ pub async fn sync_engine(
 
         loop {
             tokio::select! {
+                // Incoming message from server
+                Some(msg) = read.next() => {
+                    let text = match msg {
+                        Ok(Message::Text(text)) => text,
+                        Ok(Message::Close(frame)) => {
+                            warn!("Server WebSocket closed connection: {:?}", frame);
+                            break;
+                        }
+                        Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
+                        Ok(other) => {
+                            warn!("Received unexpected WebSocket message: {:?}", other);
+                            continue;
+                        }
+                        Err(e) => {
+                            error!("WebSocket read error: {}", e);
+                            break;
+                        }
+                    };
+
+                    let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) else {
+                        error!("Failed to deserialize ServerMessage JSON: {}", text);
+                        continue;
+                    };
+
+                    match server_msg {
+                        ServerMessage::Snapshot { seq_id, payload } => {
+                            record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
+
+                            // Cancel any pending snapshot in the chamber covered by this incoming snapshot
+                            if let Some(pending) = &pending_snapshot {
+                                if seq_id >= pending.covers_seq_id {
+                                    debug!(
+                                        "Cancelled chambered snapshot (covers seq_id: {}) because incoming snapshot (seq_id: {}) covers it",
+                                        pending.covers_seq_id, seq_id
+                                    );
+                                    pending_snapshot = None;
+                                    snapshot_debounce = None;
+                                }
+                            }
+
+                            if decrypt_merge_and_persist(&repo, &crypto, &store, &payload).await {
+                                missing_deltas.retain(|&s| s > seq_id);
+                                info!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
+                                let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
+                                let _ = app_handle.emit("todos-updated", ());
+                            }
+                        }
+                        ServerMessage::DeltaBatch { deltas } => {
+                            let mut merged_any = false;
+                            for (seq_id, payload) in deltas {
+                                record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
+
+                                if decrypt_merge_and_persist(&repo, &crypto, &store, &payload).await {
+                                    merged_any = true;
+                                    // Only mark delta as satisfied if decrypt & merge succeeded
+                                    missing_deltas.remove(&seq_id);
+                                }
+                            }
+
+                            let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
+
+                            if merged_any {
+                                info!("Successfully merged incoming DeltaBatch");
+                                let _ = app_handle.emit("todos-updated", ());
+                                schedule_snapshot_if_eligible(
+                                    &repo,
+                                    &crypto,
+                                    highest_observed_seq,
+                                    &missing_deltas,
+                                    &mut pending_snapshot,
+                                    &mut snapshot_debounce,
+                                    debounce_duration,
+                                );
+                            }
+
+                            request_sync_if_missing(&mut write, highest_observed_seq, &missing_deltas).await;
+                        }
+                        ServerMessage::Ack { seq_id } => {
+                            record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
+                            // Ack indicates a sequence ID position confirmed by server
+                            missing_deltas.remove(&seq_id);
+                            let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
+
+                            let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
+                            debug!("Received Ack from server for seq_id: {} (continuous_seq: {})", seq_id, continuous_seq);
+
+                            schedule_snapshot_if_eligible(
+                                &repo,
+                                &crypto,
+                                highest_observed_seq,
+                                &missing_deltas,
+                                &mut pending_snapshot,
+                                &mut snapshot_debounce,
+                                debounce_duration,
+                            );
+
+                            request_sync_if_missing(&mut write, highest_observed_seq, &missing_deltas).await;
+                        }
+                    }
+                }
+
                 // Debounced Snapshot Timer Triggered
                 _ = async { snapshot_debounce.as_mut().unwrap().await }, if snapshot_debounce.is_some() => {
                     snapshot_debounce = None;
@@ -84,96 +190,6 @@ pub async fn sync_engine(
                         } else {
                             debug!("Skipping debounced snapshot: missing_deltas has {} holes, continuous_seq={}", missing_deltas.len(), continuous_seq);
                         }
-                    }
-                }
-
-                // Incoming message from server
-                Some(msg) = read.next() => {
-                    match msg {
-                        Ok(Message::Text(text)) => {
-                            if let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) {
-                                match server_msg {
-                                    ServerMessage::Snapshot { seq_id, payload } => {
-                                        record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
-
-                                        // Cancel any pending snapshot in the chamber covered by this incoming snapshot
-                                        if let Some(pending) = &pending_snapshot {
-                                            if seq_id >= pending.covers_seq_id {
-                                                debug!(
-                                                    "Cancelled chambered snapshot (covers seq_id: {}) because incoming snapshot (seq_id: {}) covers it",
-                                                    pending.covers_seq_id, seq_id
-                                                );
-                                                pending_snapshot = None;
-                                                snapshot_debounce = None;
-                                            }
-                                        }
-
-                                        if decrypt_merge_and_persist(&repo, &crypto, &store, &payload).await {
-                                            missing_deltas.retain(|&s| s > seq_id);
-                                            info!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
-                                            let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
-                                            let _ = app_handle.emit("todos-updated", ());
-                                        }
-                                    }
-                                    ServerMessage::DeltaBatch { deltas } => {
-                                        let mut merged_any = false;
-                                        for (seq_id, payload) in deltas {
-                                            record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
-
-                                            if decrypt_merge_and_persist(&repo, &crypto, &store, &payload).await {
-                                                merged_any = true;
-                                                // Only mark delta as satisfied if decrypt & merge succeeded
-                                                missing_deltas.remove(&seq_id);
-                                            }
-                                        }
-
-                                        let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
-
-                                        if merged_any {
-                                            info!("Successfully merged incoming DeltaBatch");
-                                            let _ = app_handle.emit("todos-updated", ());
-                                            schedule_snapshot_if_eligible(
-                                                &repo,
-                                                &crypto,
-                                                highest_observed_seq,
-                                                &missing_deltas,
-                                                &mut pending_snapshot,
-                                                &mut snapshot_debounce,
-                                                debounce_duration,
-                                            );
-                                        }
-
-                                        request_sync_if_missing(&mut write, highest_observed_seq, &missing_deltas).await;
-                                    }
-                                    ServerMessage::Ack { seq_id } => {
-                                        record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
-                                        // Ack indicates a sequence ID position confirmed by server
-                                        missing_deltas.remove(&seq_id);
-                                        let _ = store.save_sync_state(highest_observed_seq, &missing_deltas).await;
-
-                                        let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
-                                        debug!("Received Ack from server for seq_id: {} (continuous_seq: {})", seq_id, continuous_seq);
-
-                                        schedule_snapshot_if_eligible(
-                                            &repo,
-                                            &crypto,
-                                            highest_observed_seq,
-                                            &missing_deltas,
-                                            &mut pending_snapshot,
-                                            &mut snapshot_debounce,
-                                            debounce_duration,
-                                        );
-
-                                        request_sync_if_missing(&mut write, highest_observed_seq, &missing_deltas).await;
-                                    }
-                                }
-                            }
-                        }
-                        Ok(Message::Close(_)) | Err(_) => {
-                            warn!("Server WebSocket connection closed");
-                            break;
-                        }
-                        _ => {}
                     }
                 }
 
