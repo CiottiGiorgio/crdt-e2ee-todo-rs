@@ -11,6 +11,26 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
+fn get_highest_continuous_seq(highest_observed: u64, missing: &BTreeSet<u64>) -> u64 {
+    match missing.iter().next() {
+        Some(&lowest_missing) => lowest_missing.saturating_sub(1),
+        None => highest_observed,
+    }
+}
+
+fn record_observed_seq(
+    seq_id: u64,
+    highest_observed_seq: &mut u64,
+    missing_deltas: &mut BTreeSet<u64>,
+) {
+    if seq_id > *highest_observed_seq {
+        for seq in (*highest_observed_seq + 1)..=seq_id {
+            missing_deltas.insert(seq);
+        }
+        *highest_observed_seq = seq_id;
+    }
+}
+
 pub fn start_sync_worker(
     repo: Arc<AutomergeTodoRepo>,
     crypto: Arc<CryptoEngine>,
@@ -30,14 +50,6 @@ pub fn start_sync_worker(
 
                     let mut highest_observed_seq: u64 = 0;
                     let mut missing_deltas: BTreeSet<u64> = BTreeSet::new();
-
-                    let get_highest_continuous_seq =
-                        |highest_observed: u64, missing: &BTreeSet<u64>| -> u64 {
-                            match missing.iter().next() {
-                                Some(&lowest_missing) => lowest_missing.saturating_sub(1),
-                                None => highest_observed,
-                            }
-                        };
 
                     // Periodic snapshot timer (e.g. every 5 minutes)
                     let mut snapshot_interval =
@@ -78,18 +90,13 @@ pub fn start_sync_worker(
                                         if let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) {
                                             match server_msg {
                                                 ServerMessage::Snapshot { seq_id, payload } => {
-                                                    if seq_id > highest_observed_seq {
-                                                        for seq in (highest_observed_seq + 1)..=seq_id {
-                                                            missing_deltas.insert(seq);
-                                                        }
-                                                        highest_observed_seq = seq_id;
-                                                    }
-                                                    // Snapshot satisfies all missing deltas <= seq_id
-                                                    missing_deltas.retain(|&s| s > seq_id);
+                                                    record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
 
                                                     if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {
                                                         if let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) {
                                                             if repo.merge_incoming(&mut incoming_doc).await.is_ok() {
+                                                                // Snapshot satisfies all missing deltas <= seq_id ONLY upon successful merge
+                                                                missing_deltas.retain(|&s| s > seq_id);
                                                                 println!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
                                                                 let _ = app_handle.emit("todos-updated", ());
                                                             }
@@ -99,18 +106,14 @@ pub fn start_sync_worker(
                                                 ServerMessage::DeltaBatch { deltas } => {
                                                     let mut merged_any = false;
                                                     for (seq_id, payload) in deltas {
-                                                        if seq_id > highest_observed_seq {
-                                                            for seq in (highest_observed_seq + 1)..=seq_id {
-                                                                missing_deltas.insert(seq);
-                                                            }
-                                                            highest_observed_seq = seq_id;
-                                                        }
-                                                        missing_deltas.remove(&seq_id);
+                                                        record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
 
                                                         if let Ok(decrypted_bytes) = crypto.decrypt(&payload) {
                                                             if let Ok(mut incoming_doc) = AutoCommit::load(&decrypted_bytes) {
                                                                 if repo.merge_incoming(&mut incoming_doc).await.is_ok() {
                                                                     merged_any = true;
+                                                                    // Only mark delta as satisfied if decrypt & merge succeeded
+                                                                    missing_deltas.remove(&seq_id);
                                                                 }
                                                             }
                                                         }
@@ -132,12 +135,7 @@ pub fn start_sync_worker(
                                                     }
                                                 }
                                                 ServerMessage::Ack { seq_id } => {
-                                                    if seq_id > highest_observed_seq {
-                                                        for seq in (highest_observed_seq + 1)..=seq_id {
-                                                            missing_deltas.insert(seq);
-                                                        }
-                                                        highest_observed_seq = seq_id;
-                                                    }
+                                                    record_observed_seq(seq_id, &mut highest_observed_seq, &mut missing_deltas);
                                                     // Ack indicates a sequence ID position confirmed by server
                                                     missing_deltas.remove(&seq_id);
 
