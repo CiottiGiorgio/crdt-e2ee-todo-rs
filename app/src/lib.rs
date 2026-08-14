@@ -13,12 +13,16 @@ use std::sync::Arc;
 use store::FileBackingStore;
 use tauri::Manager;
 
+use tracing::info;
+
 pub struct AppState {
     pub todo_repo: Arc<dyn TodoRepository>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = tracing_subscriber::fmt::try_init();
+
     let builder = commands::get_specta_builder();
 
     #[cfg(debug_assertions)]
@@ -43,7 +47,7 @@ pub fn run() {
             }
 
             let doc_path = app_data_dir.join(constants::AUTOMERGE_FILE_NAME);
-            println!("Initializing Automerge document at: {:?}", doc_path);
+            info!("Initializing Automerge document at: {:?}", doc_path);
 
             let store = FileBackingStore::new(doc_path);
             let repo = Arc::new(

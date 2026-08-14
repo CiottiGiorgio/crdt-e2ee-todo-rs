@@ -10,6 +10,7 @@ use tauri::Emitter;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tracing::{debug, error, info, warn};
 
 fn get_highest_continuous_seq(highest_observed: u64, missing: &BTreeSet<u64>) -> u64 {
     match missing.iter().next() {
@@ -42,10 +43,10 @@ pub fn start_sync_worker(
         let ws_url = "ws://127.0.0.1:3000/ws";
 
         loop {
-            println!("Attempting to connect to sync server at {}", ws_url);
+            info!("Attempting to connect to sync server at {}", ws_url);
             match connect_async(ws_url).await {
                 Ok((ws_stream, _)) => {
-                    println!("Connected to sync server!");
+                    info!("Connected to sync server!");
                     let (mut write, mut read) = ws_stream.split();
 
                     let mut highest_observed_seq: u64 = 0;
@@ -73,13 +74,13 @@ pub fn start_sync_worker(
                                             };
                                             if let Ok(json) = serde_json::to_string(&client_msg) {
                                                 if write.send(Message::Text(json.into())).await.is_ok() {
-                                                    println!("Pushed periodic snapshot (covers seq_id: {}) to server!", continuous_seq);
+                                                    info!("Pushed periodic snapshot (covers seq_id: {}) to server!", continuous_seq);
                                                 }
                                             }
                                         }
                                     }
                                 } else {
-                                    println!("Skipping periodic snapshot: missing_deltas has {} holes, continuous_seq={}", missing_deltas.len(), continuous_seq);
+                                    debug!("Skipping periodic snapshot: missing_deltas has {} holes, continuous_seq={}", missing_deltas.len(), continuous_seq);
                                 }
                             }
 
@@ -97,7 +98,7 @@ pub fn start_sync_worker(
                                                             if repo.merge_incoming(&mut incoming_doc).await.is_ok() {
                                                                 // Snapshot satisfies all missing deltas <= seq_id ONLY upon successful merge
                                                                 missing_deltas.retain(|&s| s > seq_id);
-                                                                println!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
+                                                                info!("Successfully merged incoming Snapshot (seq_id: {})", seq_id);
                                                                 let _ = app_handle.emit("todos-updated", ());
                                                             }
                                                         }
@@ -120,7 +121,7 @@ pub fn start_sync_worker(
                                                     }
 
                                                     if merged_any {
-                                                        println!("Successfully merged incoming DeltaBatch");
+                                                        info!("Successfully merged incoming DeltaBatch");
                                                         let _ = app_handle.emit("todos-updated", ());
                                                     }
 
@@ -140,7 +141,7 @@ pub fn start_sync_worker(
                                                     missing_deltas.remove(&seq_id);
 
                                                     let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
-                                                    println!("Received Ack from server for seq_id: {} (continuous_seq: {})", seq_id, continuous_seq);
+                                                    debug!("Received Ack from server for seq_id: {} (continuous_seq: {})", seq_id, continuous_seq);
 
                                                     if !missing_deltas.is_empty() {
                                                         let req_sync = ClientMessage::RequestSync {
@@ -155,7 +156,7 @@ pub fn start_sync_worker(
                                         }
                                     }
                                     Ok(Message::Close(_)) | Err(_) => {
-                                        eprintln!("Server WebSocket connection closed");
+                                        warn!("Server WebSocket connection closed");
                                         break;
                                     }
                                     _ => {}
@@ -172,10 +173,10 @@ pub fn start_sync_worker(
                                         };
                                         if let Ok(json) = serde_json::to_string(&client_msg) {
                                             if write.send(Message::Text(json.into())).await.is_err() {
-                                                eprintln!("Failed to push local delta update to server");
+                                                error!("Failed to push local delta update to server");
                                                 break;
                                             } else {
-                                                println!("Pushed local delta update immediately to server!");
+                                                info!("Pushed local delta update immediately to server!");
                                             }
                                         }
                                     }
@@ -185,7 +186,7 @@ pub fn start_sync_worker(
                     }
                 }
                 Err(e) => {
-                    println!(
+                    warn!(
                         "Sync server not available ({}). Retrying in 5 seconds...",
                         e
                     );

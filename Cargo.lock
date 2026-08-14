@@ -4741,6 +4741,8 @@ dependencies = [
  "tauri-specta",
  "tokio",
  "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
