@@ -1,6 +1,6 @@
 use crate::automerge::AutomergeTodoRepo;
 use crate::crypto::CryptoEngine;
-use crate::store::SqliteBackingStore;
+use crate::storage::SqliteStorage;
 use automerge::AutoCommit;
 use futures_util::SinkExt;
 use shared::{ClientMessage, EncryptedPayload};
@@ -30,15 +30,17 @@ pub fn record_observed_seq(
 pub async fn decrypt_merge_and_persist(
     repo: &AutomergeTodoRepo,
     crypto: &CryptoEngine,
-    store: &SqliteBackingStore,
+    storage: &SqliteStorage,
     payload: &EncryptedPayload,
 ) -> Result<(), String> {
     let decrypted_bytes = crypto.decrypt(payload)?;
     let mut incoming_doc = AutoCommit::load(&decrypted_bytes).map_err(|e| e.to_string())?;
-    let merged_bytes = repo.merge_incoming(&mut incoming_doc).map_err(|e| e.to_string())?;
+    let merged_bytes = repo
+        .merge_incoming(&mut incoming_doc)
+        .map_err(|e| e.to_string())?;
     let encrypted_merged = crypto.encrypt(&merged_bytes)?;
     let bytes = serde_json::to_vec(&encrypted_merged).map_err(|e| e.to_string())?;
-    store.save(&bytes).await.map_err(|e| e.to_string())?;
+    storage.save(&bytes).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 

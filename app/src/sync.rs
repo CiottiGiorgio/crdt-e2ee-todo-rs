@@ -4,7 +4,7 @@ mod helper;
 use crate::automerge::AutomergeTodoRepo;
 use crate::crypto::CryptoEngine;
 use crate::models::SyncStatus;
-use crate::store::SqliteBackingStore;
+use crate::storage::SqliteStorage;
 use constants::{RECONNECT_DELAY_SECS, WS_URL};
 use futures_util::StreamExt;
 use helper::{
@@ -22,7 +22,7 @@ use tracing::{error, info, warn};
 pub async fn sync_engine(
     repo: Arc<AutomergeTodoRepo>,
     crypto: Arc<CryptoEngine>,
-    store: Arc<SqliteBackingStore>,
+    storage: Arc<SqliteStorage>,
     app_handle: tauri::AppHandle,
     sync_status: Arc<std::sync::RwLock<SyncStatus>>,
     mut rx: mpsc::UnboundedReceiver<()>,
@@ -53,10 +53,10 @@ pub async fn sync_engine(
         info!("Connected to sync server!");
         let (mut write, mut read) = ws_stream.split();
 
-        let (mut highest_observed_seq, mut missing_deltas) = match store.get_sync_state().await {
+        let (mut highest_observed_seq, mut missing_deltas) = match storage.get_sync_state().await {
             Ok(state) => state,
             Err(e) => {
-                error!("Failed to retrieve sync state from SQLite store: {}", e);
+                error!("Failed to retrieve sync state from SQLite storage: {}", e);
                 set_status(SyncStatus::Error(format!("SQLite sync state error: {}", e)));
                 tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
                 continue;
@@ -112,7 +112,7 @@ pub async fn sync_engine(
 
                             let mut merged_any = false;
                             for (seq_id, payload) in deltas {
-                                match decrypt_merge_and_persist(&repo, &crypto, &store, &payload).await {
+                                match decrypt_merge_and_persist(&repo, &crypto, &storage, &payload).await {
                                     Ok(()) => {
                                         merged_any = true;
                                         // Only mark delta as satisfied if decrypt & merge succeeded
@@ -124,7 +124,7 @@ pub async fn sync_engine(
                                 }
                             }
 
-                            if let Err(e) = store.save_sync_state(highest_observed_seq, &missing_deltas).await {
+                            if let Err(e) = storage.save_sync_state(highest_observed_seq, &missing_deltas).await {
                                 error!("Failed to save sync state to SQLite: {}", e);
                             }
 

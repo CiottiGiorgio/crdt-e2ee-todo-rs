@@ -3,14 +3,14 @@ use sqlx::SqlitePool;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-/// SQLite-backed store for binary document data (e.g., Automerge documents)
+/// SQLite-backed storage for binary document data (e.g., Automerge documents)
 /// and synchronization metadata. Supports both in-memory and file-backed databases.
-pub struct SqliteBackingStore {
+pub struct SqliteStorage {
     pool: SqlitePool,
 }
 
-impl SqliteBackingStore {
-    /// Creates an in-memory SQLite store (useful for debug and tests).
+impl SqliteStorage {
+    /// Creates an in-memory SQLite storage (useful for debug and tests).
     pub async fn in_memory() -> Result<Self, String> {
         let pool = SqlitePoolOptions::new()
             .connect("sqlite::memory:")
@@ -25,7 +25,7 @@ impl SqliteBackingStore {
         Ok(Self { pool })
     }
 
-    /// Creates a file-backed SQLite store at the specified path.
+    /// Creates a file-backed SQLite storage at the specified path.
     pub async fn from_path(db_path: impl AsRef<Path>) -> Result<Self, String> {
         let path = db_path.as_ref();
         let database_url = format!("sqlite://{}?mode=rwc", path.display());
@@ -43,7 +43,7 @@ impl SqliteBackingStore {
         Ok(Self { pool })
     }
 
-    /// Loads document bytes from the store.
+    /// Loads document bytes from the storage.
     /// Returns `Ok(Some(bytes))` if data exists, `Ok(None)` if no saved data exists, or `Err` on failure.
     pub async fn load(&self) -> Result<Option<Vec<u8>>, String> {
         let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT data FROM automerge_doc WHERE id = 1")
@@ -54,7 +54,7 @@ impl SqliteBackingStore {
         Ok(row.map(|r| r.0))
     }
 
-    /// Saves document bytes to the store.
+    /// Saves document bytes to the storage.
     pub async fn save(&self, data: &[u8]) -> Result<(), String> {
         sqlx::query("INSERT OR REPLACE INTO automerge_doc (id, data) VALUES (1, ?)")
             .bind(data)
@@ -110,28 +110,28 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_sqlite_store_in_memory() {
-        let store = SqliteBackingStore::in_memory().await.unwrap();
-        assert_eq!(store.load().await.unwrap(), None);
+    async fn test_sqlite_storage_in_memory() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        assert_eq!(storage.load().await.unwrap(), None);
 
         let data = vec![1, 2, 3, 4];
-        store.save(&data).await.unwrap();
-        assert_eq!(store.load().await.unwrap(), Some(data));
+        storage.save(&data).await.unwrap();
+        assert_eq!(storage.load().await.unwrap(), Some(data));
 
-        assert_eq!(store.get_sync_state().await.unwrap(), (0, BTreeSet::new()));
+        assert_eq!(storage.get_sync_state().await.unwrap(), (0, BTreeSet::new()));
 
         let mut missing = BTreeSet::new();
         missing.insert(2);
         missing.insert(4);
-        store.save_sync_state(5, &missing).await.unwrap();
+        storage.save_sync_state(5, &missing).await.unwrap();
 
-        assert_eq!(store.get_sync_state().await.unwrap(), (5, missing));
+        assert_eq!(storage.get_sync_state().await.unwrap(), (5, missing));
     }
 
     #[tokio::test]
-    async fn test_sqlite_store_fails_if_folder_does_not_exist() {
+    async fn test_sqlite_storage_fails_if_folder_does_not_exist() {
         let nonexistent_path = "/nonexistent_folder_12345/store.db";
-        let result = SqliteBackingStore::from_path(nonexistent_path).await;
+        let result = SqliteStorage::from_path(nonexistent_path).await;
         assert!(result.is_err());
     }
 }

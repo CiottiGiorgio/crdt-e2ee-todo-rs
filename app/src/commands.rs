@@ -21,7 +21,7 @@ pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoIt
     let (item, doc_bytes) = state.repo.add(text).await?;
     let encrypted = state.crypto.encrypt(&doc_bytes)?;
     let encrypted_bytes = serde_json::to_vec(&encrypted).map_err(|e| e.to_string())?;
-    state.store.save(&encrypted_bytes).await?;
+    state.storage.save(&encrypted_bytes).await?;
     let _ = state.sync_tx.send(());
     Ok(item)
 }
@@ -36,7 +36,7 @@ pub async fn update_todo_status(
     let doc_bytes = state.repo.update_status(id, status).await?;
     let encrypted = state.crypto.encrypt(&doc_bytes)?;
     let encrypted_bytes = serde_json::to_vec(&encrypted).map_err(|e| e.to_string())?;
-    state.store.save(&encrypted_bytes).await?;
+    state.storage.save(&encrypted_bytes).await?;
     let _ = state.sync_tx.send(());
     Ok(())
 }
@@ -47,7 +47,7 @@ pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), S
     let doc_bytes = state.repo.delete(id).await?;
     let encrypted = state.crypto.encrypt(&doc_bytes)?;
     let encrypted_bytes = serde_json::to_vec(&encrypted).map_err(|e| e.to_string())?;
-    state.store.save(&encrypted_bytes).await?;
+    state.storage.save(&encrypted_bytes).await?;
     let _ = state.sync_tx.send(());
     Ok(())
 }

@@ -3,13 +3,13 @@ pub mod commands;
 mod constants;
 mod crypto;
 mod models;
-pub mod store;
+pub mod storage;
 mod sync;
 
 use automerge::AutomergeTodoRepo;
 use crypto::CryptoEngine;
 use std::sync::Arc;
-use store::SqliteBackingStore;
+use storage::SqliteStorage;
 use tauri::Manager;
 
 #[cfg(not(debug_assertions))]
@@ -17,7 +17,7 @@ use tracing::info;
 
 pub struct AppState {
     pub repo: Arc<AutomergeTodoRepo>,
-    pub store: Arc<SqliteBackingStore>,
+    pub storage: Arc<SqliteStorage>,
     pub crypto: Arc<CryptoEngine>,
     pub sync_tx: tokio::sync::mpsc::UnboundedSender<()>,
     pub sync_status: Arc<std::sync::RwLock<models::SyncStatus>>,
@@ -47,11 +47,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             #[cfg(debug_assertions)]
-            let store = tauri::async_runtime::block_on(store::SqliteBackingStore::in_memory())
-                .expect("failed to initialize in-memory sqlite backing store");
+            let storage = tauri::async_runtime::block_on(storage::SqliteStorage::in_memory())
+                .expect("failed to initialize in-memory sqlite storage");
 
             #[cfg(not(debug_assertions))]
-            let store = {
+            let storage = {
                 let app_data_dir = app
                     .path()
                     .app_data_dir()
@@ -62,19 +62,19 @@ pub fn run() {
                         .expect("failed to create app data directory");
                 }
 
-                let db_path = app_data_dir.join("store.db");
-                tauri::async_runtime::block_on(store::SqliteBackingStore::from_path(db_path))
-                    .expect("failed to initialize sqlite backing store")
+                let db_path = app_data_dir.join("storage.db");
+                tauri::async_runtime::block_on(storage::SqliteStorage::from_path(db_path))
+                    .expect("failed to initialize sqlite storage")
             };
 
-            let store = Arc::new(store);
+            let storage = Arc::new(storage);
 
             // Shared E2EE Symmetric Key (32 bytes)
             let master_key = [42u8; constants::KEY_SIZE];
             let crypto = Arc::new(CryptoEngine::new(&master_key));
 
-            let encrypted_data = tauri::async_runtime::block_on(store.load())
-                .expect("failed to load data from store");
+            let encrypted_data = tauri::async_runtime::block_on(storage.load())
+                .expect("failed to load data from storage");
 
             let decrypted_data = match encrypted_data {
                 Some(data) => {
@@ -96,7 +96,7 @@ pub fn run() {
             tauri::async_runtime::spawn(sync::sync_engine(
                 repo.clone(),
                 crypto.clone(),
-                store.clone(),
+                storage.clone(),
                 app.handle().clone(),
                 sync_status.clone(),
                 sync_rx,
@@ -104,7 +104,7 @@ pub fn run() {
 
             app.manage(AppState {
                 repo,
-                store,
+                storage,
                 crypto,
                 sync_tx,
                 sync_status,
