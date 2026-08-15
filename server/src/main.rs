@@ -80,12 +80,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // A channel for sending messages directly to THIS client only (e.g. initial sync)
     let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<ServerMessage>();
 
-    // Send Ack message immediately with current highest seq_id straight from SQLite
-    let highest_seq_id = state.store.get_highest_seq_id().await.unwrap_or(0);
-    let _ = direct_tx.send(ServerMessage::Ack {
-        seq_id: highest_seq_id,
-    });
-
     // Spawn task to forward messages to the WebSocket
     let send_task = tokio::spawn(async move {
         loop {
@@ -120,27 +114,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
                 match client_msg {
                     ClientMessage::RequestSync { from_seq_id } => {
-                        let snapshot = state.store.get_snapshot().await.ok().flatten();
-                        let snap_seq = snapshot.as_ref().map(|(s, _)| *s).unwrap_or(0);
-
-                        if from_seq_id < snap_seq {
-                            // Send snapshot first
-                            if let Some((seq_id, payload)) = snapshot {
-                                let _ = direct_tx.send(ServerMessage::Snapshot { seq_id, payload });
-                            }
-
-                            // Send deltas after snap_seq as a single batch
-                            if let Ok(deltas) = state.store.get_deltas_after(snap_seq).await {
-                                if !deltas.is_empty() {
-                                    let _ = direct_tx.send(ServerMessage::DeltaBatch { deltas });
-                                }
-                            }
-                        } else {
-                            // Send deltas after from_seq_id as a single batch
-                            if let Ok(deltas) = state.store.get_deltas_after(from_seq_id).await {
-                                if !deltas.is_empty() {
-                                    let _ = direct_tx.send(ServerMessage::DeltaBatch { deltas });
-                                }
+                        if let Ok(deltas) = state.store.get_deltas_after(from_seq_id).await {
+                            if !deltas.is_empty() {
+                                let _ = direct_tx.send(ServerMessage::DeltaBatch { deltas });
                             }
                         }
                     }
@@ -150,8 +126,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                                 "Received Delta from Client {} -> Assigned SeqId: {}",
                                 my_client_id, seq_id
                             );
-                            // Send Ack back to sender so it knows its assigned sequence ID
-                            let _ = direct_tx.send(ServerMessage::Ack { seq_id });
 
                             // Broadcast batch to everyone else
                             let _ = state.tx.send((
@@ -164,36 +138,6 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                             error!("Failed to save Delta from client {}", my_client_id);
                         }
                     }
-                    ClientMessage::Snapshot {
-                        covers_seq_id,
-                        payload,
-                    } => match state.store.save_snapshot(covers_seq_id, &payload).await {
-                        Ok(true) => {
-                            info!(
-                                "Accepted Snapshot from Client {} covering up to SeqId: {}",
-                                my_client_id, covers_seq_id
-                            );
-                            let _ = state.tx.send((
-                                my_client_id,
-                                ServerMessage::Snapshot {
-                                    seq_id: covers_seq_id,
-                                    payload,
-                                },
-                            ));
-                        }
-                        Ok(false) => {
-                            info!(
-                                "Rejected Snapshot from Client {} (covers seq_id: {}, which does not strictly advance current snapshot or exceeds released seq_id)",
-                                my_client_id, covers_seq_id
-                            );
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failed to save Snapshot from client {}: {}",
-                                my_client_id, e
-                            );
-                        }
-                    },
                 }
             } else {
                 error!("Failed to parse ClientMessage from client {}", my_client_id);
