@@ -44,15 +44,20 @@ impl AutomergeTodoRepo {
     }
 
     /// Decodes and applies an incoming Automerge sync message against the given
-    /// peer `state`, advancing the local document as needed.
-    pub fn receive_sync_message(&self, state: &mut SyncState, data: &[u8]) -> Result<(), String> {
+    /// peer `state`, advancing the local document as needed. Returns `true` when
+    /// the message actually advanced the document (the heads changed), and
+    /// `false` when it was a protocol-only exchange (e.g. an acknowledgement)
+    /// that left the document untouched. Callers use this to avoid echoing
+    /// spurious update notifications for no-op syncs.
+    pub fn receive_sync_message(&self, state: &mut SyncState, data: &[u8]) -> Result<bool, String> {
         let msg = SyncMessage::decode(data).map_err(|e| format!("decode sync msg: {}", e))?;
         let mut doc = self.doc.write().map_err(|e| e.to_string())?;
-        let result = doc
-            .sync()
+        let heads_before = doc.get_heads();
+        doc.sync()
             .receive_sync_message(state, msg)
-            .map_err(|e| format!("receive sync msg: {}", e));
-        result
+            .map_err(|e| format!("receive sync msg: {}", e))?;
+        let heads_after = doc.get_heads();
+        Ok(heads_before != heads_after)
     }
 
     fn status_to_str(status: TodoStatus) -> &'static str {
@@ -337,6 +342,45 @@ mod tests {
         // Now both are in sync: neither peer has anything to send.
         assert!(repo_a.generate_sync_message(&mut state_a).unwrap().is_none());
         assert!(repo_b.generate_sync_message(&mut state_b).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_receive_sync_message_reports_document_change() {
+        // Peer A has data; peer B is empty. As the handshake proceeds, peer B
+        // observes the message that actually delivers A's change as a
+        // document-advancing receive (returns `true`) exactly once; every other
+        // protocol-only round leaves the doc untouched and returns `false`.
+        let repo_a = AutomergeTodoRepo::new(None, test_crypto()).unwrap();
+        let repo_b = AutomergeTodoRepo::new(None, test_crypto()).unwrap();
+        repo_a.add("payload".to_string()).await.unwrap();
+
+        let mut state_a = SyncState::new();
+        let mut state_b = SyncState::new();
+
+        let mut b_change_count = 0;
+        loop {
+            let msg_a = repo_a.generate_sync_message(&mut state_a).unwrap();
+            if let Some(ref data) = msg_a {
+                if repo_b.receive_sync_message(&mut state_b, data).unwrap() {
+                    b_change_count += 1;
+                }
+            }
+            let msg_b = repo_b.generate_sync_message(&mut state_b).unwrap();
+            if let Some(ref data) = msg_b {
+                repo_a.receive_sync_message(&mut state_a, data).unwrap();
+            }
+            if msg_a.is_none() && msg_b.is_none() {
+                break;
+            }
+        }
+
+        // The change was delivered exactly once as a real, document-advancing
+        // update; no protocol-only round is counted as a change.
+        assert_eq!(
+            b_change_count, 1,
+            "peer B should apply A's change exactly once"
+        );
+        assert_eq!(repo_b.get_all().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

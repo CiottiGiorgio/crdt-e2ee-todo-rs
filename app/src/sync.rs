@@ -102,21 +102,30 @@ pub async fn sync_engine(
                         }
                     };
 
-                    if let Err(e) = repo.receive_sync_message(&mut sync_state, &data) {
-                        error!("Failed to apply incoming sync message: {}", e);
-                        continue;
-                    }
+                    let changed = match repo.receive_sync_message(&mut sync_state, &data) {
+                        Ok(changed) => changed,
+                        Err(e) => {
+                            error!("Failed to apply incoming sync message: {}", e);
+                            continue;
+                        }
+                    };
 
-                    // Persist the updated document (plaintext structure,
-                    // ciphertext values) at rest.
-                    let doc_bytes = repo.get_doc_bytes();
-                    if let Err(e) = storage.save(&doc_bytes).await {
-                        error!("Failed to persist document after applying sync message: {}", e);
-                    }
+                    // Only persist and notify the frontend when the sync message
+                    // actually advanced the document. Protocol-only exchanges
+                    // (e.g. acknowledgements after our own local change) leave the
+                    // document untouched and must not echo a `todos-updated` event.
+                    if changed {
+                        // Persist the updated document (plaintext structure,
+                        // ciphertext values) at rest.
+                        let doc_bytes = repo.get_doc_bytes();
+                        if let Err(e) = storage.save(&doc_bytes).await {
+                            error!("Failed to persist document after applying sync message: {}", e);
+                        }
 
-                    info!("Applied incoming sync message");
-                    if let Err(e) = app_handle.emit("todos-updated", ()) {
-                        error!("Failed to emit todos-updated event: {}", e);
+                        info!("Applied incoming sync message");
+                        if let Err(e) = app_handle.emit("todos-updated", ()) {
+                            error!("Failed to emit todos-updated event: {}", e);
+                        }
                     }
 
                     // Respond with any follow-up messages the protocol needs.

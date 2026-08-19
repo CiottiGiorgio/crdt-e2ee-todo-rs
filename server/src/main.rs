@@ -185,11 +185,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         };
 
-        // Apply the incoming sync message to the authoritative
-        // document, then capture the bytes to persist.
-        let saved_bytes = {
+        // Apply the incoming sync message to the authoritative document. Compare
+        // the heads before and after to learn whether it actually advanced the
+        // document; protocol-only exchanges (e.g. acknowledgements) leave it
+        // untouched. Only persist and fan out to other clients when it changed.
+        let changed_bytes = {
             let mut doc = state.doc.lock().unwrap();
             let mut ss = sync_state.lock().unwrap();
+            let heads_before = doc.get_heads();
             let res = doc.sync().receive_sync_message(&mut ss, msg);
             if let Err(e) = res {
                 error!(
@@ -198,19 +201,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 );
                 continue;
             }
-            doc.save()
+            let heads_after = doc.get_heads();
+            if heads_before != heads_after {
+                Some(doc.save())
+            } else {
+                None
+            }
         };
 
-        if let Err(e) = state.store.save_doc(&saved_bytes).await {
-            error!("Failed to persist automerge document: {}", e);
+        if let Some(saved_bytes) = changed_bytes {
+            // The document advanced: persist the new tree and wake up every
+            // other client so they sync the new state.
+            if let Err(e) = state.store.save_doc(&saved_bytes).await {
+                error!("Failed to persist automerge document: {}", e);
+            }
+
+            info!("Applied sync message from client {}", my_client_id);
+
+            let _ = state.tx.send(my_client_id);
         }
 
-        info!("Applied sync message from client {}", my_client_id);
-
-        // Wake up every other client so they sync the new state.
-        let _ = state.tx.send(my_client_id);
-
-        // Drain any follow-up messages this peer needs to send.
+        // Always drain any follow-up messages this peer needs to send so the
+        // handshake with this client can converge, even for protocol-only rounds.
         enqueue_pending(&direct_tx);
     }
 
