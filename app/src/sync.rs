@@ -15,9 +15,16 @@ use tokio::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{error, info, warn};
 
-/// Drains outgoing sync messages for the current peer `state`, sending each over
-/// the WebSocket as a binary frame until `generate_sync_message` yields nothing more.
-async fn drain_outgoing<S>(
+/// Sends this peer's pending outgoing sync message (if any) over the WebSocket
+/// as a binary frame.
+///
+/// This is single-shot rather than a drain loop: after `generate_sync_message`
+/// emits a message it sets the peer `state`'s `in_flight` flag, which is only
+/// cleared by `receive_sync_message`. With no intervening receive, an immediate
+/// second call is guaranteed to return `None`, so a `while let` would iterate
+/// exactly once here anyway — one message per triggering event (inbound frame or
+/// local change), then the server must respond before more is generated.
+async fn send_outgoing<S>(
     repo: &AutomergeTodoRepo,
     state: &mut SyncState,
     write: &mut S,
@@ -26,7 +33,7 @@ where
     S: futures_util::SinkExt<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
-    while let Some(data) = repo.generate_sync_message(state)? {
+    if let Some(data) = repo.generate_sync_message(state)? {
         send_sync_message(write, &data).await?;
     }
     Ok(())
@@ -72,7 +79,7 @@ pub async fn sync_engine(
 
         // Drive the handshake: send our initial sync message(s) so the server
         // learns what we have and returns what we are missing.
-        if let Err(e) = drain_outgoing(&repo, &mut sync_state, &mut write).await {
+        if let Err(e) = send_outgoing(&repo, &mut sync_state, &mut write).await {
             error!("Failed to send initial sync message to server: {}", e);
             set_status(SyncStatus::Disconnected);
             tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
@@ -102,25 +109,34 @@ pub async fn sync_engine(
                         }
                     };
 
-                    if let Err(e) = repo.receive_sync_message(&mut sync_state, &data) {
-                        error!("Failed to apply incoming sync message: {}", e);
-                        continue;
-                    }
+                    let changed = match repo.receive_sync_message(&mut sync_state, &data) {
+                        Ok(changed) => changed,
+                        Err(e) => {
+                            error!("Failed to apply incoming sync message: {}", e);
+                            continue;
+                        }
+                    };
 
-                    // Persist the updated document (plaintext structure,
-                    // ciphertext values) at rest.
-                    let doc_bytes = repo.get_doc_bytes();
-                    if let Err(e) = storage.save(&doc_bytes).await {
-                        error!("Failed to persist document after applying sync message: {}", e);
-                    }
+                    // Only persist and notify the frontend when the sync message
+                    // actually advanced the document. Protocol-only exchanges
+                    // (e.g. acknowledgements after our own local change) leave the
+                    // document untouched and must not echo a `todos-updated` event.
+                    if changed {
+                        // Persist the updated document (plaintext structure,
+                        // ciphertext values) at rest.
+                        let doc_bytes = repo.get_doc_bytes();
+                        if let Err(e) = storage.save(&doc_bytes).await {
+                            error!("Failed to persist document after applying sync message: {}", e);
+                        }
 
-                    info!("Applied incoming sync message");
-                    if let Err(e) = app_handle.emit("todos-updated", ()) {
-                        error!("Failed to emit todos-updated event: {}", e);
+                        info!("Applied incoming sync message");
+                        if let Err(e) = app_handle.emit("todos-updated", ()) {
+                            error!("Failed to emit todos-updated event: {}", e);
+                        }
                     }
 
                     // Respond with any follow-up messages the protocol needs.
-                    if let Err(e) = drain_outgoing(&repo, &mut sync_state, &mut write).await {
+                    if let Err(e) = send_outgoing(&repo, &mut sync_state, &mut write).await {
                         error!("Failed to send follow-up sync messages: {}", e);
                         set_status(SyncStatus::Disconnected);
                         break;
@@ -131,7 +147,7 @@ pub async fn sync_engine(
                 change_msg = rx.recv() => {
                     match change_msg {
                         Some(_) => {
-                            if let Err(e) = drain_outgoing(&repo, &mut sync_state, &mut write).await {
+                            if let Err(e) = send_outgoing(&repo, &mut sync_state, &mut write).await {
                                 error!("Failed to push local changes to server: {}", e);
                                 set_status(SyncStatus::Disconnected);
                                 break;

@@ -30,17 +30,25 @@ struct AppState {
     tx: broadcast::Sender<usize>,
 }
 
-/// Drains all pending outgoing Automerge sync messages for `sync_state` against
-/// the authoritative document, returning each encoded message. The locks are
+/// Generates the pending outgoing Automerge sync message for `sync_state`
+/// against the authoritative document, returning it encoded. The locks are
 /// released before the caller performs any async send.
-fn generate_pending(doc: &Mutex<AutoCommit>, sync_state: &Mutex<SyncState>) -> Vec<Vec<u8>> {
+///
+/// This is single-shot rather than a drain loop: after `generate_sync_message`
+/// emits a message it sets `sync_state.in_flight = true`, and that flag is only
+/// cleared by `receive_sync_message`. With no intervening receive (the doc is
+/// locked and this is synchronous), an immediate second call is guaranteed to
+/// return `None`. So a `while let` would iterate exactly once here anyway — one
+/// message per triggering event (inbound frame or wake-up), then the peer must
+/// respond before more is generated.
+fn generate_pending(doc: &Mutex<AutoCommit>, sync_state: &Mutex<SyncState>) -> Option<Vec<u8>> {
     let mut doc = doc.lock().unwrap();
     let mut state = sync_state.lock().unwrap();
-    let mut out = Vec::new();
-    while let Some(msg) = doc.sync().generate_sync_message(&mut state) {
-        out.push(msg.encode());
-    }
-    out
+    let message = doc
+        .sync()
+        .generate_sync_message(&mut state)
+        .map(|msg| msg.encode());
+    message
 }
 
 #[tokio::main]
@@ -113,9 +121,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     // A channel for sending sync messages directly to THIS client's socket.
     let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
-    // Helper: enqueue all pending outgoing sync messages for this peer.
+    // Helper: enqueue this peer's pending outgoing sync message, if any.
     let enqueue_pending = |direct_tx: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>| {
-        for data in generate_pending(&state.doc, &sync_state) {
+        if let Some(data) = generate_pending(&state.doc, &sync_state) {
             let _ = direct_tx.send(data);
         }
     };
@@ -133,7 +141,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     // A wake-up from another client whose change advanced the doc.
                     Ok(sender_id) = rx.recv() => {
                         if sender_id != my_client_id {
-                            for data in generate_pending(&doc, &sync_state) {
+                            if let Some(data) = generate_pending(&doc, &sync_state) {
                                 if sender.send(Message::Binary(data.into())).await.is_err() {
                                     return;
                                 }
@@ -185,11 +193,14 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
         };
 
-        // Apply the incoming sync message to the authoritative
-        // document, then capture the bytes to persist.
-        let saved_bytes = {
+        // Apply the incoming sync message to the authoritative document. Compare
+        // the heads before and after to learn whether it actually advanced the
+        // document; protocol-only exchanges (e.g. acknowledgements) leave it
+        // untouched. Only persist and fan out to other clients when it changed.
+        let changed_bytes = {
             let mut doc = state.doc.lock().unwrap();
             let mut ss = sync_state.lock().unwrap();
+            let heads_before = doc.get_heads();
             let res = doc.sync().receive_sync_message(&mut ss, msg);
             if let Err(e) = res {
                 error!(
@@ -198,19 +209,28 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 );
                 continue;
             }
-            doc.save()
+            let heads_after = doc.get_heads();
+            if heads_before != heads_after {
+                Some(doc.save())
+            } else {
+                None
+            }
         };
 
-        if let Err(e) = state.store.save_doc(&saved_bytes).await {
-            error!("Failed to persist automerge document: {}", e);
+        if let Some(saved_bytes) = changed_bytes {
+            // The document advanced: persist the new tree and wake up every
+            // other client so they sync the new state.
+            if let Err(e) = state.store.save_doc(&saved_bytes).await {
+                error!("Failed to persist automerge document: {}", e);
+            }
+
+            info!("Applied sync message from client {}", my_client_id);
+
+            let _ = state.tx.send(my_client_id);
         }
 
-        info!("Applied sync message from client {}", my_client_id);
-
-        // Wake up every other client so they sync the new state.
-        let _ = state.tx.send(my_client_id);
-
-        // Drain any follow-up messages this peer needs to send.
+        // Always drain any follow-up messages this peer needs to send so the
+        // handshake with this client can converge, even for protocol-only rounds.
         enqueue_pending(&direct_tx);
     }
 
