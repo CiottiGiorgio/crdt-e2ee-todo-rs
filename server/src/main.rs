@@ -7,7 +7,6 @@ use axum::{
     Router,
 };
 use futures::{SinkExt, StreamExt};
-use shared::{ClientMessage, ServerMessage};
 use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -121,10 +120,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         }
     };
 
-    // Spawn a task to forward encoded sync messages to the WebSocket. It reacts
-    // to wake-up notifications from other clients by generating this peer's next
-    // sync message, and forwards directly-queued messages produced by the
-    // receive loop.
+    // Spawn a task to forward encoded sync messages to the WebSocket as binary
+    // frames. It reacts to wake-up notifications from other clients by generating
+    // this peer's next sync message, and forwards directly-queued messages
+    // produced by the receive loop.
     let send_task = {
         let doc = state.doc.clone();
         let sync_state = sync_state.clone();
@@ -135,7 +134,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     Ok(sender_id) = rx.recv() => {
                         if sender_id != my_client_id {
                             for data in generate_pending(&doc, &sync_state) {
-                                if serialize_and_send(&mut sender, data).await.is_err() {
+                                if sender.send(Message::Binary(data.into())).await.is_err() {
                                     return;
                                 }
                             }
@@ -143,7 +142,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                     }
                     // A message produced directly by this connection's receive loop.
                     Some(data) = direct_rx.recv() => {
-                        if serialize_and_send(&mut sender, data).await.is_err() {
+                        if sender.send(Message::Binary(data.into())).await.is_err() {
                             return;
                         }
                     }
@@ -158,71 +157,64 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
 
     // Handle incoming messages from this client.
     while let Some(Ok(msg)) = receiver.next().await {
-        if let Message::Text(text) = msg {
-            let client_msg = match serde_json::from_str::<ClientMessage>(&text) {
-                Ok(msg) => msg,
-                Err(_) => {
-                    error!("Failed to parse ClientMessage from client {}", my_client_id);
-                    continue;
-                }
-            };
-
-            match client_msg {
-                ClientMessage::Sync { data } => {
-                    let msg = match SyncMessage::decode(&data) {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            error!(
-                                "Failed to decode sync message from client {}: {}",
-                                my_client_id, e
-                            );
-                            continue;
-                        }
-                    };
-
-                    // Apply the incoming sync message to the authoritative
-                    // document, then capture the bytes to persist.
-                    let saved_bytes = {
-                        let mut doc = state.doc.lock().unwrap();
-                        let mut ss = sync_state.lock().unwrap();
-                        let res = doc.sync().receive_sync_message(&mut ss, msg);
-                        if let Err(e) = res {
-                            error!(
-                                "Failed to receive sync message from client {}: {}",
-                                my_client_id, e
-                            );
-                            continue;
-                        }
-                        doc.save()
-                    };
-
-                    if let Err(e) = state.store.save_doc(&saved_bytes).await {
-                        error!("Failed to persist automerge document: {}", e);
-                    }
-
-                    info!("Applied sync message from client {}", my_client_id);
-
-                    // Wake up every other client so they sync the new state.
-                    let _ = state.tx.send(my_client_id);
-
-                    // Drain any follow-up messages this peer needs to send.
-                    enqueue_pending(&direct_tx);
-                }
+        let data = match msg {
+            Message::Binary(data) => data,
+            Message::Close(frame) => {
+                info!("Client {} closed connection: {:?}", my_client_id, frame);
+                break;
             }
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => {
+                tracing::warn!(
+                    "Received unexpected WebSocket message from client {}: {:?}",
+                    my_client_id,
+                    other
+                );
+                continue;
+            }
+        };
+
+        let msg = match SyncMessage::decode(&data) {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!(
+                    "Failed to decode sync message from client {}: {}",
+                    my_client_id, e
+                );
+                continue;
+            }
+        };
+
+        // Apply the incoming sync message to the authoritative
+        // document, then capture the bytes to persist.
+        let saved_bytes = {
+            let mut doc = state.doc.lock().unwrap();
+            let mut ss = sync_state.lock().unwrap();
+            let res = doc.sync().receive_sync_message(&mut ss, msg);
+            if let Err(e) = res {
+                error!(
+                    "Failed to receive sync message from client {}: {}",
+                    my_client_id, e
+                );
+                continue;
+            }
+            doc.save()
+        };
+
+        if let Err(e) = state.store.save_doc(&saved_bytes).await {
+            error!("Failed to persist automerge document: {}", e);
         }
+
+        info!("Applied sync message from client {}", my_client_id);
+
+        // Wake up every other client so they sync the new state.
+        let _ = state.tx.send(my_client_id);
+
+        // Drain any follow-up messages this peer needs to send.
+        enqueue_pending(&direct_tx);
     }
 
     info!("Client {} disconnected", my_client_id);
     send_task.abort();
 }
 
-/// Sends an encoded sync message to a client's WebSocket as a JSON
-/// [`ServerMessage::Sync`] envelope.
-async fn serialize_and_send(
-    sender: &mut futures::stream::SplitSink<WebSocket, Message>,
-    data: Vec<u8>,
-) -> Result<(), ()> {
-    let msg = ServerMessage::Sync { data };
-    let json = serde_json::to_string(&msg).map_err(|_| ())?;
-    sender.send(Message::Text(json.into())).await.map_err(|_| ())
-}

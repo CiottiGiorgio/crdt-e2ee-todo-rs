@@ -3674,8 +3674,6 @@ dependencies = [
  "automerge",
  "axum",
  "futures",
- "serde",
- "serde_json",
  "shared",
  "sqlx",
  "tokio",
@@ -3751,7 +3749,6 @@ name = "shared"
 version = "0.1.0"
 dependencies = [
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -4703,7 +4700,6 @@ dependencies = [
  "futures-util",
  "rand 0.10.2",
  "serde",
- "serde_json",
  "shared",
  "specta",
  "specta-typescript",

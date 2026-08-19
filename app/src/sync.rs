@@ -7,8 +7,7 @@ use crate::storage::SqliteStorage;
 use automerge::sync::State as SyncState;
 use constants::{RECONNECT_DELAY_SECS, WS_URL};
 use futures_util::StreamExt;
-use helper::send_client_message;
-use shared::{ClientMessage, ServerMessage};
+use helper::send_sync_message;
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::sync::mpsc;
@@ -17,7 +16,7 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{error, info, warn};
 
 /// Drains outgoing sync messages for the current peer `state`, sending each over
-/// the WebSocket until `generate_sync_message` yields nothing more.
+/// the WebSocket as a binary frame until `generate_sync_message` yields nothing more.
 async fn drain_outgoing<S>(
     repo: &AutomergeTodoRepo,
     state: &mut SyncState,
@@ -28,7 +27,7 @@ where
     S::Error: std::fmt::Display,
 {
     while let Some(data) = repo.generate_sync_message(state)? {
-        send_client_message(write, &ClientMessage::Sync { data }).await?;
+        send_sync_message(write, &data).await?;
     }
     Ok(())
 }
@@ -82,10 +81,10 @@ pub async fn sync_engine(
 
         loop {
             tokio::select! {
-                // Incoming message from server
+                // Incoming binary sync message from server
                 Some(msg) = read.next() => {
-                    let text = match msg {
-                        Ok(Message::Text(text)) => text,
+                    let data = match msg {
+                        Ok(Message::Binary(data)) => data,
                         Ok(Message::Close(frame)) => {
                             warn!("Server WebSocket closed connection: {:?}", frame);
                             set_status(SyncStatus::Disconnected);
@@ -103,37 +102,28 @@ pub async fn sync_engine(
                         }
                     };
 
-                    let Ok(server_msg) = serde_json::from_str::<ServerMessage>(&text) else {
-                        error!("Failed to deserialize ServerMessage JSON: {}", text);
+                    if let Err(e) = repo.receive_sync_message(&mut sync_state, &data) {
+                        error!("Failed to apply incoming sync message: {}", e);
                         continue;
-                    };
+                    }
 
-                    match server_msg {
-                        ServerMessage::Sync { data } => {
-                            if let Err(e) = repo.receive_sync_message(&mut sync_state, &data) {
-                                error!("Failed to apply incoming sync message: {}", e);
-                                continue;
-                            }
+                    // Persist the updated document (plaintext structure,
+                    // ciphertext values) at rest.
+                    let doc_bytes = repo.get_doc_bytes();
+                    if let Err(e) = storage.save(&doc_bytes).await {
+                        error!("Failed to persist document after applying sync message: {}", e);
+                    }
 
-                            // Persist the updated document (plaintext structure,
-                            // ciphertext values) at rest.
-                            let doc_bytes = repo.get_doc_bytes();
-                            if let Err(e) = storage.save(&doc_bytes).await {
-                                error!("Failed to persist document after applying sync message: {}", e);
-                            }
+                    info!("Applied incoming sync message");
+                    if let Err(e) = app_handle.emit("todos-updated", ()) {
+                        error!("Failed to emit todos-updated event: {}", e);
+                    }
 
-                            info!("Applied incoming sync message");
-                            if let Err(e) = app_handle.emit("todos-updated", ()) {
-                                error!("Failed to emit todos-updated event: {}", e);
-                            }
-
-                            // Respond with any follow-up messages the protocol needs.
-                            if let Err(e) = drain_outgoing(&repo, &mut sync_state, &mut write).await {
-                                error!("Failed to send follow-up sync messages: {}", e);
-                                set_status(SyncStatus::Disconnected);
-                                break;
-                            }
-                        }
+                    // Respond with any follow-up messages the protocol needs.
+                    if let Err(e) = drain_outgoing(&repo, &mut sync_state, &mut write).await {
+                        error!("Failed to send follow-up sync messages: {}", e);
+                        set_status(SyncStatus::Disconnected);
+                        break;
                     }
                 }
 
