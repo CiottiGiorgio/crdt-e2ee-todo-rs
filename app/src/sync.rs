@@ -2,15 +2,12 @@ mod constants;
 mod helper;
 
 use crate::automerge::AutomergeTodoRepo;
-use crate::crypto::CryptoEngine;
 use crate::models::SyncStatus;
 use crate::storage::SqliteStorage;
+use automerge::sync::State as SyncState;
 use constants::{RECONNECT_DELAY_SECS, WS_URL};
 use futures_util::StreamExt;
-use helper::{
-    decrypt_merge_and_persist, get_encrypted_local_doc, get_highest_continuous_seq,
-    record_observed_seq, request_sync_if_missing, send_client_message,
-};
+use helper::send_client_message;
 use shared::{ClientMessage, ServerMessage};
 use std::sync::Arc;
 use tauri::Emitter;
@@ -19,9 +16,25 @@ use tokio::time::Duration;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tracing::{error, info, warn};
 
+/// Drains outgoing sync messages for the current peer `state`, sending each over
+/// the WebSocket until `generate_sync_message` yields nothing more.
+async fn drain_outgoing<S>(
+    repo: &AutomergeTodoRepo,
+    state: &mut SyncState,
+    write: &mut S,
+) -> Result<(), String>
+where
+    S: futures_util::SinkExt<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    while let Some(data) = repo.generate_sync_message(state)? {
+        send_client_message(write, &ClientMessage::Sync { data }).await?;
+    }
+    Ok(())
+}
+
 pub async fn sync_engine(
     repo: Arc<AutomergeTodoRepo>,
-    crypto: Arc<CryptoEngine>,
     storage: Arc<SqliteStorage>,
     app_handle: tauri::AppHandle,
     sync_status: Arc<std::sync::RwLock<SyncStatus>>,
@@ -53,24 +66,15 @@ pub async fn sync_engine(
         info!("Connected to sync server!");
         let (mut write, mut read) = ws_stream.split();
 
-        let (mut highest_observed_seq, mut missing_deltas) = match storage.get_sync_state().await {
-            Ok(state) => state,
-            Err(e) => {
-                error!("Failed to retrieve sync state from SQLite storage: {}", e);
-                set_status(SyncStatus::Error(format!("SQLite sync state error: {}", e)));
-                tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
-                continue;
-            }
-        };
+        // A fresh sync state is created per connection; peers renegotiate from
+        // scratch on reconnect (no head bookkeeping is persisted).
+        let mut sync_state = SyncState::new();
         set_status(SyncStatus::Connected);
 
-        // Immediately request missing deltas on connect
-        let continuous_seq = get_highest_continuous_seq(highest_observed_seq, &missing_deltas);
-        let req_sync = ClientMessage::RequestSync {
-            from_seq_id: continuous_seq,
-        };
-        if let Err(e) = send_client_message(&mut write, &req_sync).await {
-            error!("Failed to send initial RequestSync to server: {}", e);
+        // Drive the handshake: send our initial sync message(s) so the server
+        // learns what we have and returns what we are missing.
+        if let Err(e) = drain_outgoing(&repo, &mut sync_state, &mut write).await {
+            error!("Failed to send initial sync message to server: {}", e);
             set_status(SyncStatus::Disconnected);
             tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
             continue;
@@ -105,38 +109,29 @@ pub async fn sync_engine(
                     };
 
                     match server_msg {
-                        ServerMessage::DeltaBatch { deltas } => {
-                            if let Some(max_seq) = deltas.iter().map(|(seq, _)| *seq).max() {
-                                record_observed_seq(max_seq, &mut highest_observed_seq, &mut missing_deltas);
+                        ServerMessage::Sync { data } => {
+                            if let Err(e) = repo.receive_sync_message(&mut sync_state, &data) {
+                                error!("Failed to apply incoming sync message: {}", e);
+                                continue;
                             }
 
-                            let mut merged_any = false;
-                            for (seq_id, payload) in deltas {
-                                match decrypt_merge_and_persist(&repo, &crypto, &storage, &payload).await {
-                                    Ok(()) => {
-                                        merged_any = true;
-                                        // Only mark delta as satisfied if decrypt & merge succeeded
-                                        missing_deltas.remove(&seq_id);
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to merge incoming delta (seq_id: {}): {}", seq_id, e);
-                                    }
-                                }
+                            // Persist the updated document (plaintext structure,
+                            // ciphertext values) at rest.
+                            let doc_bytes = repo.get_doc_bytes();
+                            if let Err(e) = storage.save(&doc_bytes).await {
+                                error!("Failed to persist document after applying sync message: {}", e);
                             }
 
-                            if let Err(e) = storage.save_sync_state(highest_observed_seq, &missing_deltas).await {
-                                error!("Failed to save sync state to SQLite: {}", e);
+                            info!("Applied incoming sync message");
+                            if let Err(e) = app_handle.emit("todos-updated", ()) {
+                                error!("Failed to emit todos-updated event: {}", e);
                             }
 
-                            if merged_any {
-                                info!("Successfully merged incoming DeltaBatch");
-                                if let Err(e) = app_handle.emit("todos-updated", ()) {
-                                    error!("Failed to emit todos-updated event: {}", e);
-                                }
-                            }
-
-                            if let Err(e) = request_sync_if_missing(&mut write, highest_observed_seq, &missing_deltas).await {
-                                error!("Failed to send RequestSync to server: {}", e);
+                            // Respond with any follow-up messages the protocol needs.
+                            if let Err(e) = drain_outgoing(&repo, &mut sync_state, &mut write).await {
+                                error!("Failed to send follow-up sync messages: {}", e);
+                                set_status(SyncStatus::Disconnected);
+                                break;
                             }
                         }
                     }
@@ -146,21 +141,12 @@ pub async fn sync_engine(
                 change_msg = rx.recv() => {
                     match change_msg {
                         Some(_) => {
-                            match get_encrypted_local_doc(&repo, &crypto) {
-                                Ok(Some(payload)) => {
-                                    let client_msg = ClientMessage::Delta { payload };
-                                    if let Err(e) = send_client_message(&mut write, &client_msg).await {
-                                        error!("Failed to push local delta update to server: {}", e);
-                                        break;
-                                    } else {
-                                        info!("Pushed local delta update immediately to server!");
-                                    }
-                                }
-                                Ok(None) => {}
-                                Err(e) => {
-                                    error!("Failed to encrypt local document for delta update: {}", e);
-                                }
+                            if let Err(e) = drain_outgoing(&repo, &mut sync_state, &mut write).await {
+                                error!("Failed to push local changes to server: {}", e);
+                                set_status(SyncStatus::Disconnected);
+                                break;
                             }
+                            info!("Pushed local changes immediately to server!");
                         }
                         None => {
                             info!("Shutdown signal received: closing sync engine...");

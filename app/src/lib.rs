@@ -73,20 +73,14 @@ pub fn run() {
             let master_key = [42u8; constants::KEY_SIZE];
             let crypto = Arc::new(CryptoEngine::new(&master_key));
 
-            let encrypted_data = tauri::async_runtime::block_on(storage.load())
+            // Local at-rest storage holds the raw automerge document: plaintext
+            // structure with per-value ciphertext. Whole-document encryption is no
+            // longer applied since the sensitive values are already encrypted.
+            let stored_data = tauri::async_runtime::block_on(storage.load())
                 .expect("failed to load data from storage");
 
-            let decrypted_data = match encrypted_data {
-                Some(data) => {
-                    let payload: shared::EncryptedPayload =
-                        serde_json::from_slice(&data).expect("failed to deserialize payload");
-                    Some(crypto.decrypt(&payload).expect("failed to decrypt data"))
-                }
-                None => None,
-            };
-
             let repo = Arc::new(
-                AutomergeTodoRepo::new(decrypted_data)
+                AutomergeTodoRepo::new(stored_data, crypto.clone())
                     .expect("failed to initialize automerge repository"),
             );
 
@@ -95,7 +89,6 @@ pub fn run() {
 
             tauri::async_runtime::spawn(sync::sync_engine(
                 repo.clone(),
-                crypto.clone(),
                 storage.clone(),
                 app.handle().clone(),
                 sync_status.clone(),

@@ -1,7 +1,6 @@
-use shared::EncryptedPayload;
-use sqlx::{Row, SqlitePool};
+use sqlx::SqlitePool;
 
-/// SQLite-backed implementation of the server-side sync storage backend.
+/// SQLite-backed persistence for the server's authoritative automerge document.
 #[derive(Clone)]
 pub struct SqliteSyncStore {
     pool: SqlitePool,
@@ -17,49 +16,101 @@ impl SqliteSyncStore {
         Self { pool }
     }
 
-    pub async fn get_highest_seq_id(&self) -> Result<u64, sqlx::Error> {
-        sqlx::query_scalar::<_, i64>("SELECT highest_seq_id FROM server_state")
-            .fetch_one(&self.pool)
-            .await
-            .map(|v| v as u64)
+    /// Loads the persisted automerge document bytes, if any exist.
+    pub async fn load_doc(&self) -> Result<Option<Vec<u8>>, sqlx::Error> {
+        let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT data FROM automerge_doc WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.0))
     }
 
-    pub async fn get_deltas_after(
-        &self,
-        from_seq_id: u64,
-    ) -> Result<Vec<(u64, EncryptedPayload)>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT seq_id, ciphertext, nonce FROM deltas WHERE seq_id > ? ORDER BY seq_id ASC",
-        )
-        .bind(from_seq_id as i64)
-        .fetch_all(&self.pool)
-        .await?;
+    /// Persists the authoritative automerge document bytes.
+    pub async fn save_doc(&self, data: &[u8]) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT OR REPLACE INTO automerge_doc (id, data) VALUES (1, ?)")
+            .bind(data)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
 
-        let mut deltas = Vec::new();
-        for row in rows {
-            let seq_id: i64 = row.get(0);
-            let ciphertext: Vec<u8> = row.get(1);
-            let nonce_vec: Vec<u8> = row.get(2);
-            if let Ok(nonce) = nonce_vec.try_into() {
-                deltas.push((seq_id as u64, EncryptedPayload { ciphertext, nonce }));
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use automerge::sync::{State as SyncState, SyncDoc};
+    use automerge::transaction::Transactable;
+    use automerge::{AutoCommit, ReadDoc, ROOT};
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_store() -> SqliteSyncStore {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        SqliteSyncStore::new(pool).await
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load_doc() {
+        let store = test_store().await;
+        assert_eq!(store.load_doc().await.unwrap(), None);
+
+        let mut doc = AutoCommit::new();
+        doc.put(ROOT, "key", "value").unwrap();
+        let bytes = doc.save();
+
+        store.save_doc(&bytes).await.unwrap();
+        let loaded = store.load_doc().await.unwrap().unwrap();
+
+        // The stored bytes reload into an equivalent document.
+        let reloaded = AutoCommit::load(&loaded).unwrap();
+        assert!(reloaded.get(ROOT, "key").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_receive_sync_message_then_persist_roundtrip() {
+        let store = test_store().await;
+
+        // A source peer holds a change we want the server to receive.
+        let mut source = AutoCommit::new();
+        source.put(ROOT, "key", "value").unwrap();
+
+        // The server-side document starts empty. Drive the Automerge sync
+        // protocol until neither peer has anything left to send.
+        let mut server_doc = AutoCommit::new();
+        let mut source_state = SyncState::new();
+        let mut server_state = SyncState::new();
+        loop {
+            let from_source = source.sync().generate_sync_message(&mut source_state);
+            if let Some(msg) = from_source.clone() {
+                server_doc
+                    .sync()
+                    .receive_sync_message(&mut server_state, msg)
+                    .unwrap();
+            }
+
+            let from_server = server_doc.sync().generate_sync_message(&mut server_state);
+            if let Some(msg) = from_server.clone() {
+                source
+                    .sync()
+                    .receive_sync_message(&mut source_state, msg)
+                    .unwrap();
+            }
+
+            if from_source.is_none() && from_server.is_none() {
+                break;
             }
         }
-        Ok(deltas)
-    }
 
-    pub async fn save_delta(&self, payload: &EncryptedPayload) -> Result<u64, sqlx::Error> {
-        let highest_seq = self.get_highest_seq_id().await.unwrap_or(0);
-        let seq = highest_seq + 1;
+        // Persist the document the server converged to, then reload it.
+        let bytes = server_doc.save();
+        store.save_doc(&bytes).await.unwrap();
+        let loaded = store.load_doc().await.unwrap().unwrap();
 
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("INSERT INTO deltas (seq_id, ciphertext, nonce) VALUES (?, ?, ?)")
-            .bind(seq as i64)
-            .bind(&payload.ciphertext)
-            .bind(&payload.nonce[..])
-            .execute(&mut *tx)
-            .await?;
-
-        tx.commit().await?;
-        Ok(seq)
+        // The change the server received via the sync protocol survives a
+        // persist/reload round-trip.
+        let reloaded = AutoCommit::load(&loaded).unwrap();
+        let (value, _) = reloaded.get(ROOT, "key").unwrap().unwrap();
+        assert_eq!(value.into_string().ok().as_deref(), Some("value"));
     }
 }

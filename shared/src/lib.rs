@@ -9,17 +9,17 @@ pub struct EncryptedPayload {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
-    /// Send an incremental Automerge sync message (delta)
-    Delta { payload: EncryptedPayload },
-    /// Request sync state from server starting after from_seq_id
-    RequestSync { from_seq_id: u64 },
+    /// An encoded Automerge `sync::Message`. The sync protocol is symmetric, so
+    /// this single variant carries the client's half of the handshake. Scalar
+    /// values (todo `text`/`status`) remain encrypted inside the transported
+    /// document bytes.
+    Sync { data: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
-    /// Server broadcasting a batch of deltas to clients
-    DeltaBatch {
-        deltas: Vec<(u64, EncryptedPayload)>,
-    },
+    /// An encoded Automerge `sync::Message` representing the server's half of the
+    /// handshake for a given client.
+    Sync { data: Vec<u8> },
 }
