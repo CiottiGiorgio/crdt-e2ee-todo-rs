@@ -90,9 +90,7 @@ mod tests {
 
             let from_server = server_doc.generate_sync_message(&mut server_state);
             if let Some(msg) = from_server.clone() {
-                source
-                    .receive_sync_message(&mut source_state, msg)
-                    .unwrap();
+                source.receive_sync_message(&mut source_state, msg).unwrap();
             }
 
             if from_source.is_none() && from_server.is_none() {

@@ -21,10 +21,7 @@ pub enum SocketHandlerError {
     WakeUp(#[from] watch::error::RecvError),
 
     #[error("Database persistence ({db}) and WebSocket transport ({ws}) both failed")]
-    DatabaseAndWebSocket {
-        db: sqlx::Error,
-        ws: axum::Error,
-    },
+    DatabaseAndWebSocket { db: sqlx::Error, ws: axum::Error },
 }
 
 pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), SocketHandlerError> {

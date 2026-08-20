@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tower_http::cors::CorsLayer;
-use tracing::{info, Instrument, error};
+use tracing::{error, info, Instrument};
 
 mod storage;
 mod websocket;
@@ -22,8 +22,6 @@ static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 struct AppState {
     storage: SqliteStorage,
     doc: Arc<RwLock<Automerge>>,
-    /// Wake-up signal carrying the id of the client whose change advanced the
-    /// authoritative document, so other connections re-run the sync protocol.
     sync_wake_up: watch::Sender<()>,
 }
 
