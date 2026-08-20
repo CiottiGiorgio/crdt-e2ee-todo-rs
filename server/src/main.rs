@@ -131,19 +131,29 @@ async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Box<dyn
                     }
                 };
 
-                let mut doc_guard = state.doc.write().await;
-                let heads_pre_merge = doc_guard.get_heads();
-                doc_guard.sync().receive_sync_message(&mut sync_state, msg)?;
-                let heads_post_merge = doc_guard.get_heads();
+                let (bytes_to_save, response_msg) = {
+                    let mut doc_guard = state.doc.write().await;
+                    let heads_pre_merge = doc_guard.get_heads();
+                    doc_guard.sync().receive_sync_message(&mut sync_state, msg)?;
+                    let heads_post_merge = doc_guard.get_heads();
 
-                if heads_pre_merge != heads_post_merge {
-                    state.store.save_doc(&doc_guard.save()).await?;
-                    let _ = state.sync_wake_up.send(());
+                    let mut bytes_to_save = None;
+                    if heads_pre_merge != heads_post_merge {
+                        bytes_to_save = Some(doc_guard.save());
+                    }
+
+                    let response_msg = doc_guard.sync().generate_sync_message(&mut sync_state);
+
+                    (bytes_to_save, response_msg)
+                };
+
+                if let Some(bytes_to_save) = bytes_to_save {
+                    state.store.save_doc(&bytes_to_save).await?;
+                    state.sync_wake_up.send(())?;
                 }
 
-                let response_msg = doc_guard.sync().generate_sync_message(&mut sync_state);
-                if let Some(msg) = response_msg {
-                    sender.send(msg.encode().into()).await?;
+                if let Some(response_msg) = response_msg {
+                    sender.send(response_msg.encode().into()).await?;
                 }
             }
             Ok(_) = wake_up.changed() => {
