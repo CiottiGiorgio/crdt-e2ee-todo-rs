@@ -1,12 +1,12 @@
 use sqlx::SqlitePool;
 
-/// SQLite-backed persistence for the server's authoritative automerge document.
+/// SQLite-backed storage for the server's authoritative automerge document.
 #[derive(Clone)]
-pub struct SqliteSyncStore {
+pub struct SqliteStorage {
     pool: SqlitePool,
 }
 
-impl SqliteSyncStore {
+impl SqliteStorage {
     pub async fn new(pool: SqlitePool) -> Self {
         sqlx::migrate!("./migrations")
             .run(&pool)
@@ -42,25 +42,25 @@ mod tests {
     use automerge::{Automerge, ReadDoc, ROOT};
     use sqlx::sqlite::SqlitePoolOptions;
 
-    async fn test_store() -> SqliteSyncStore {
+    async fn test_storage() -> SqliteStorage {
         let pool = SqlitePoolOptions::new()
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        SqliteSyncStore::new(pool).await
+        SqliteStorage::new(pool).await
     }
 
     #[tokio::test]
     async fn test_save_and_load_doc() {
-        let store = test_store().await;
-        assert_eq!(store.load_doc().await.unwrap(), None);
+        let storage = test_storage().await;
+        assert_eq!(storage.load_doc().await.unwrap(), None);
 
         let mut doc = Automerge::new();
         doc.transact(|tx| tx.put(ROOT, "key", "value")).unwrap();
         let bytes = doc.save();
 
-        store.save_doc(&bytes).await.unwrap();
-        let loaded = store.load_doc().await.unwrap().unwrap();
+        storage.save_doc(&bytes).await.unwrap();
+        let loaded = storage.load_doc().await.unwrap().unwrap();
 
         // The stored bytes reload into an equivalent document.
         let reloaded = Automerge::load(&loaded).unwrap();
@@ -69,7 +69,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_receive_sync_message_then_persist_roundtrip() {
-        let store = test_store().await;
+        let storage = test_storage().await;
 
         // A source peer holds a change we want the server to receive.
         let mut source = Automerge::new();
@@ -102,8 +102,8 @@ mod tests {
 
         // Persist the document the server converged to, then reload it.
         let bytes = server_doc.save();
-        store.save_doc(&bytes).await.unwrap();
-        let loaded = store.load_doc().await.unwrap().unwrap();
+        storage.save_doc(&bytes).await.unwrap();
+        let loaded = storage.load_doc().await.unwrap().unwrap();
 
         // The change the server received via the sync protocol survives a
         // persist/reload round-trip.

@@ -94,7 +94,7 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
 
                 let save_fut = async {
                     if let Some(bytes_to_save) = bytes_to_save {
-                        state.store.save_doc(&bytes_to_save).await?;
+                        state.storage.save_doc(&bytes_to_save).await?;
                         debug!("Document was persisted to the database");
                     }
                     Ok::<(), sqlx::Error>(())

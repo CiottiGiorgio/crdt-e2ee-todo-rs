@@ -7,10 +7,10 @@ use tokio::sync::{watch, RwLock};
 use tower_http::cors::CorsLayer;
 use tracing::{info, Instrument, error};
 
-mod sync_store;
+mod storage;
 mod websocket;
 
-use sync_store::SqliteSyncStore;
+use storage::SqliteStorage;
 
 use websocket::handle_socket;
 
@@ -20,7 +20,7 @@ static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone)]
 struct AppState {
-    store: SqliteSyncStore,
+    storage: SqliteStorage,
     doc: Arc<RwLock<Automerge>>,
     /// Wake-up signal carrying the id of the client whose change advanced the
     /// authoritative document, so other connections re-run the sync protocol.
@@ -35,7 +35,7 @@ async fn main() {
     let database_url = "sqlite::memory:";
 
     #[cfg(not(debug_assertions))]
-    let database_url = "sqlite://sync_store.db?mode=rwc";
+    let database_url = "sqlite://storage.db?mode=rwc";
 
     info!("Connecting to SQLite database at: {}", database_url);
 
@@ -44,10 +44,10 @@ async fn main() {
         .await
         .expect("Failed to connect to SQLite with sqlx");
 
-    let sync_store = SqliteSyncStore::new(pool).await;
+    let storage = SqliteStorage::new(pool).await;
 
     // Load the authoritative automerge document from storage (or start fresh).
-    let doc = match sync_store.load_doc().await {
+    let doc = match storage.load_doc().await {
         Ok(Some(bytes)) => {
             Automerge::load(&bytes).expect("Failed to load persisted automerge document")
         }
@@ -57,7 +57,7 @@ async fn main() {
 
     let (tx, _rx) = watch::channel::<()>(());
     let state = AppState {
-        store: sync_store,
+        storage,
         doc: Arc::new(RwLock::new(doc)),
         sync_wake_up: tx,
     };
