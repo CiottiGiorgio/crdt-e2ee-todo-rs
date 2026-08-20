@@ -8,9 +8,10 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use sqlx::sqlite::SqlitePoolOptions;
+use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use tokio::sync::broadcast;
+use std::sync::{Arc};
+use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
@@ -24,31 +25,12 @@ static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 #[derive(Clone)]
 struct AppState {
     store: SqliteSyncStore,
-    doc: Arc<Mutex<AutoCommit>>,
+    // FIXME: AutoCommit requires &mut for generating sync messages because it closes outstanding transactions.
+    //  This requires us to acquire a write lock which means we serialize all the updates to the clients.
+    doc: Arc<RwLock<AutoCommit>>,
     /// Wake-up signal carrying the id of the client whose change advanced the
     /// authoritative document, so other connections re-run the sync protocol.
-    tx: broadcast::Sender<usize>,
-}
-
-/// Generates the pending outgoing Automerge sync message for `sync_state`
-/// against the authoritative document, returning it encoded. The locks are
-/// released before the caller performs any async send.
-///
-/// This is single-shot rather than a drain loop: after `generate_sync_message`
-/// emits a message it sets `sync_state.in_flight = true`, and that flag is only
-/// cleared by `receive_sync_message`. With no intervening receive (the doc is
-/// locked and this is synchronous), an immediate second call is guaranteed to
-/// return `None`. So a `while let` would iterate exactly once here anyway — one
-/// message per triggering event (inbound frame or wake-up), then the peer must
-/// respond before more is generated.
-fn generate_pending(doc: &Mutex<AutoCommit>, sync_state: &Mutex<SyncState>) -> Option<Vec<u8>> {
-    let mut doc = doc.lock().unwrap();
-    let mut state = sync_state.lock().unwrap();
-    let message = doc
-        .sync()
-        .generate_sync_message(&mut state)
-        .map(|msg| msg.encode());
-    message
+    sync_wake_up: broadcast::Sender<usize>,
 }
 
 #[tokio::main]
@@ -82,8 +64,8 @@ async fn main() {
     let (tx, _rx) = broadcast::channel::<usize>(100);
     let state = AppState {
         store: sync_store,
-        doc: Arc::new(Mutex::new(doc)),
-        tx,
+        doc: Arc::new(RwLock::new(doc)),
+        sync_wake_up: tx,
     };
 
     let app = Router::new()
@@ -103,138 +85,78 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> axum::response::Response {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+    ws.on_upgrade(async |socket| {
+        if let Err(e) = handle_socket(socket, state).await {
+            tracing::debug!("Connection ended with error: {}", e);
+        }
+    })
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Box<dyn Error>> {
     let my_client_id = CLIENT_COUNTER.fetch_add(1, Ordering::SeqCst);
     info!("Client {} connected", my_client_id);
 
     let (mut sender, mut receiver) = socket.split();
-    let mut rx = state.tx.subscribe();
+    let mut wake_up = state.sync_wake_up.subscribe();
 
-    // Per-connection Automerge sync state for THIS peer. Shared between the
-    // receive loop (draining follow-up messages) and the send task (reacting to
-    // wake-up notifications). In-memory only; renegotiated on reconnect.
-    let sync_state = Arc::new(Mutex::new(SyncState::new()));
-
-    // A channel for sending sync messages directly to THIS client's socket.
-    let (direct_tx, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-
-    // Helper: enqueue this peer's pending outgoing sync message, if any.
-    let enqueue_pending = |direct_tx: &tokio::sync::mpsc::UnboundedSender<Vec<u8>>| {
-        if let Some(data) = generate_pending(&state.doc, &sync_state) {
-            let _ = direct_tx.send(data);
-        }
-    };
-
-    // Spawn a task to forward encoded sync messages to the WebSocket as binary
-    // frames. It reacts to wake-up notifications from other clients by generating
-    // this peer's next sync message, and forwards directly-queued messages
-    // produced by the receive loop.
-    let send_task = {
-        let doc = state.doc.clone();
-        let sync_state = sync_state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    // A wake-up from another client whose change advanced the doc.
-                    Ok(sender_id) = rx.recv() => {
-                        if sender_id != my_client_id {
-                            if let Some(data) = generate_pending(&doc, &sync_state) {
-                                if sender.send(Message::Binary(data.into())).await.is_err() {
-                                    return;
-                                }
-                            }
-                        }
+    let mut sync_state = SyncState::new();
+    loop {
+        tokio::select! {
+            Some(Ok(msg)) = receiver.next() => {
+                let data = match msg {
+                    Message::Binary(data) => data,
+                    Message::Close(frame) => {
+                        info!("Client {} closed connection: {:?}", my_client_id, frame);
+                        break;
                     }
-                    // A message produced directly by this connection's receive loop.
-                    Some(data) = direct_rx.recv() => {
-                        if sender.send(Message::Binary(data.into())).await.is_err() {
-                            return;
-                        }
+                    Message::Ping(_) | Message::Pong(_) => continue,
+                    other => {
+                        tracing::warn!(
+                            "Received unexpected WebSocket message from client {}: {:?}",
+                            my_client_id,
+                            other
+                        );
+                        continue;
                     }
-                    else => break,
+                };
+
+                let msg = match SyncMessage::decode(&data) {
+                    Ok(msg) => msg,
+                    Err(e) => {
+                        error!(
+                            "Failed to decode sync message from client {}: {}",
+                            my_client_id, e
+                        );
+                        continue;
+                    }
+                };
+
+                let mut doc_guard = state.doc.write().await;
+                let heads_pre_merge = doc_guard.get_heads();
+                doc_guard.sync().receive_sync_message(&mut sync_state, msg)?;
+                let heads_post_merge = doc_guard.get_heads();
+
+                if heads_pre_merge != heads_post_merge {
+                    state.store.save_doc(&doc_guard.save()).await?;
+                    let _ = state.sync_wake_up.send(my_client_id);
+                }
+
+                let response_msg = doc_guard.sync().generate_sync_message(&mut sync_state);
+                if let Some(msg) = response_msg {
+                    sender.send(msg.encode().into()).await?;
                 }
             }
-        })
-    };
-
-    // Drive the handshake from the server side too: enqueue our initial message.
-    enqueue_pending(&direct_tx);
-
-    // Handle incoming messages from this client.
-    while let Some(Ok(msg)) = receiver.next().await {
-        let data = match msg {
-            Message::Binary(data) => data,
-            Message::Close(frame) => {
-                info!("Client {} closed connection: {:?}", my_client_id, frame);
-                break;
+            Ok(waker_client_id) = wake_up.recv() => {
+                if waker_client_id != my_client_id {
+                    if let Some(data) = state.doc.write().await.sync().generate_sync_message(&mut sync_state) {
+                        sender.send(data.encode().into()).await?;
+                    }
+                }
             }
-            Message::Ping(_) | Message::Pong(_) => continue,
-            other => {
-                tracing::warn!(
-                    "Received unexpected WebSocket message from client {}: {:?}",
-                    my_client_id,
-                    other
-                );
-                continue;
-            }
-        };
-
-        let msg = match SyncMessage::decode(&data) {
-            Ok(msg) => msg,
-            Err(e) => {
-                error!(
-                    "Failed to decode sync message from client {}: {}",
-                    my_client_id, e
-                );
-                continue;
-            }
-        };
-
-        // Apply the incoming sync message to the authoritative document. Compare
-        // the heads before and after to learn whether it actually advanced the
-        // document; protocol-only exchanges (e.g. acknowledgements) leave it
-        // untouched. Only persist and fan out to other clients when it changed.
-        let changed_bytes = {
-            let mut doc = state.doc.lock().unwrap();
-            let mut ss = sync_state.lock().unwrap();
-            let heads_before = doc.get_heads();
-            let res = doc.sync().receive_sync_message(&mut ss, msg);
-            if let Err(e) = res {
-                error!(
-                    "Failed to receive sync message from client {}: {}",
-                    my_client_id, e
-                );
-                continue;
-            }
-            let heads_after = doc.get_heads();
-            if heads_before != heads_after {
-                Some(doc.save())
-            } else {
-                None
-            }
-        };
-
-        if let Some(saved_bytes) = changed_bytes {
-            // The document advanced: persist the new tree and wake up every
-            // other client so they sync the new state.
-            if let Err(e) = state.store.save_doc(&saved_bytes).await {
-                error!("Failed to persist automerge document: {}", e);
-            }
-
-            info!("Applied sync message from client {}", my_client_id);
-
-            let _ = state.tx.send(my_client_id);
         }
-
-        // Always drain any follow-up messages this peer needs to send so the
-        // handshake with this client can converge, even for protocol-only rounds.
-        enqueue_pending(&direct_tx);
     }
 
     info!("Client {} disconnected", my_client_id);
-    send_task.abort();
-}
 
+    Ok(())
+}

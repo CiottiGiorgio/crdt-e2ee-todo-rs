@@ -340,8 +340,14 @@ mod tests {
             }
         }
         // Now both are in sync: neither peer has anything to send.
-        assert!(repo_a.generate_sync_message(&mut state_a).unwrap().is_none());
-        assert!(repo_b.generate_sync_message(&mut state_b).unwrap().is_none());
+        assert!(repo_a
+            .generate_sync_message(&mut state_a)
+            .unwrap()
+            .is_none());
+        assert!(repo_b
+            .generate_sync_message(&mut state_b)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

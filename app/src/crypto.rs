@@ -99,9 +99,7 @@ mod tests {
 
         // The encoding is nonce(12) || ciphertext and must not contain the plaintext.
         assert!(encrypted.len() > IV_SIZE);
-        assert!(!encrypted
-            .windows(plaintext.len())
-            .any(|w| w == plaintext));
+        assert!(!encrypted.windows(plaintext.len()).any(|w| w == plaintext));
 
         let decrypted = engine.decrypt_value(&encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
