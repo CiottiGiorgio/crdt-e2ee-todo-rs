@@ -1,22 +1,18 @@
-use automerge::sync::{Message as SyncMessage, State as SyncState, SyncDoc};
 use automerge::AutoCommit;
-use axum::{
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::State,
-    routing::get,
-    Router,
-};
-use futures::{SinkExt, StreamExt};
+use axum::{extract::ws::WebSocketUpgrade, extract::State, routing::get, Router};
 use sqlx::sqlite::SqlitePoolOptions;
-use std::error::Error;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tower_http::cors::CorsLayer;
-use tracing::{error, info};
+use tracing::info;
 
 mod sync_store;
+mod websocket;
+
 use sync_store::SqliteSyncStore;
+
+use websocket::handle_socket;
 
 // FIXME: We don't want sequential numbers for the connected clients as this potentially leaks
 //  how many clients are connected at a given time.
@@ -90,81 +86,4 @@ async fn ws_handler(
             tracing::debug!("Connection ended with error: {}", e);
         }
     })
-}
-
-async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Box<dyn Error>> {
-    let my_client_id = CLIENT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    info!("Client {} connected", my_client_id);
-
-    let (mut sender, mut receiver) = socket.split();
-    let mut wake_up = state.sync_wake_up.subscribe();
-
-    let mut sync_state = SyncState::new();
-    loop {
-        tokio::select! {
-            Some(Ok(msg)) = receiver.next() => {
-                let data = match msg {
-                    Message::Binary(data) => data,
-                    Message::Close(frame) => {
-                        info!("Client {} closed connection: {:?}", my_client_id, frame);
-                        break;
-                    }
-                    Message::Ping(_) | Message::Pong(_) => continue,
-                    other => {
-                        tracing::warn!(
-                            "Received unexpected WebSocket message from client {}: {:?}",
-                            my_client_id,
-                            other
-                        );
-                        continue;
-                    }
-                };
-
-                let msg = match SyncMessage::decode(&data) {
-                    Ok(msg) => msg,
-                    Err(e) => {
-                        error!(
-                            "Failed to decode sync message from client {}: {}",
-                            my_client_id, e
-                        );
-                        continue;
-                    }
-                };
-
-                let (bytes_to_save, response_msg) = {
-                    let mut doc_guard = state.doc.write().await;
-                    let heads_pre_merge = doc_guard.get_heads();
-                    doc_guard.sync().receive_sync_message(&mut sync_state, msg)?;
-                    let heads_post_merge = doc_guard.get_heads();
-
-                    let mut bytes_to_save = None;
-                    if heads_pre_merge != heads_post_merge {
-                        bytes_to_save = Some(doc_guard.save());
-                    }
-
-                    let response_msg = doc_guard.sync().generate_sync_message(&mut sync_state);
-
-                    (bytes_to_save, response_msg)
-                };
-
-                if let Some(bytes_to_save) = bytes_to_save {
-                    state.store.save_doc(&bytes_to_save).await?;
-                    state.sync_wake_up.send(())?;
-                }
-
-                if let Some(response_msg) = response_msg {
-                    sender.send(response_msg.encode().into()).await?;
-                }
-            }
-            Ok(_) = wake_up.changed() => {
-                if let Some(data) = state.doc.write().await.sync().generate_sync_message(&mut sync_state) {
-                    sender.send(data.encode().into()).await?;
-                }
-            }
-        }
-    }
-
-    info!("Client {} disconnected", my_client_id);
-
-    Ok(())
 }

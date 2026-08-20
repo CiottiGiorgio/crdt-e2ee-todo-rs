@@ -3676,6 +3676,7 @@ dependencies = [
  "futures",
  "shared",
  "sqlx",
+ "thiserror 2.0.20",
  "tokio",
  "tower-http 0.7.0",
  "tracing",
