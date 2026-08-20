@@ -1,11 +1,11 @@
 use automerge::AutoCommit;
 use axum::{extract::ws::WebSocketUpgrade, extract::State, routing::get, Router};
 use sqlx::sqlite::SqlitePoolOptions;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, Instrument, error};
 
 mod sync_store;
 mod websocket;
@@ -81,9 +81,15 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> axum::response::Response {
-    ws.on_upgrade(async |socket| {
-        if let Err(e) = handle_socket(socket, state).await {
-            tracing::debug!("Connection ended with error: {}", e);
+    let client_id = CLIENT_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let span = tracing::info_span!("ws_session", client_id);
+
+    ws.on_upgrade(move |socket| {
+        async move {
+            if let Err(e) = handle_socket(socket, state).await {
+                error!("Connection ended with error: {}", e);
+            }
         }
+        .instrument(span)
     })
 }

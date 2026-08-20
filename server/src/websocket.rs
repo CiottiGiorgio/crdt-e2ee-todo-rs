@@ -1,11 +1,10 @@
-use crate::{AppState, CLIENT_COUNTER};
+use crate::AppState;
 use automerge::sync::{Message as SyncMessage, State as SyncState, SyncDoc};
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use std::sync::atomic::Ordering;
 use thiserror::Error;
 use tokio::sync::watch;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum SocketHandlerError {
@@ -20,11 +19,16 @@ pub enum SocketHandlerError {
 
     #[error("Sync wake-up signal error: {0}")]
     WakeUp(#[from] watch::error::RecvError),
+
+    #[error("Database persistence ({db}) and WebSocket transport ({ws}) both failed")]
+    DatabaseAndWebSocket {
+        db: sqlx::Error,
+        ws: axum::Error,
+    },
 }
 
 pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), SocketHandlerError> {
-    let my_client_id = CLIENT_COUNTER.fetch_add(1, Ordering::SeqCst);
-    info!("Client {} connected", my_client_id);
+    info!("Connected");
 
     let (mut sender, mut receiver) = socket.split();
     let mut wake_up = state.sync_wake_up.subscribe();
@@ -36,34 +40,40 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                 let msg = match msg_opt {
                     Some(Ok(msg)) => { msg }
                     Some(Err(e)) => {
-                        debug!("WebSocket read error from client {}: {}", my_client_id, e);
+                        debug!("WebSocket read error: {}", e);
                         break;
                     }
-                    None => { break; }
+                    None => {
+                        debug!("Connection reached EOF");
+                        break;
+                    }
                 };
                 let data = match msg {
                     Message::Binary(data) => data,
                     Message::Close(frame) => {
-                        info!("Client {} closed connection: {:?}", my_client_id, frame);
+                        debug!("Received a closing frame: {:?}", frame);
                         break;
                     }
-                    Message::Ping(_) | Message::Pong(_) => continue,
+                    Message::Ping(_) => {
+                        debug!("Ping received");
+                        continue;
+                    },
+                    Message::Pong(_) => {
+                        debug!("Pong received");
+                        continue;
+                    },
                     other => {
-                        tracing::warn!(
-                            "Received unexpected WebSocket message from client {}: {:?}",
-                            my_client_id,
-                            other
-                        );
+                        warn!("Received unexpected WebSocket message: {:?}", other);
                         continue;
                     }
                 };
                 let msg = match SyncMessage::decode(&data) {
-                    Ok(msg) => msg,
+                    Ok(msg) => {
+                        debug!("Received a sync message");
+                        msg
+                    },
                     Err(e) => {
-                        error!(
-                            "Failed to decode sync message from client {}: {}",
-                            my_client_id, e
-                        );
+                        error!("Failed to decode sync message {}", e);
                         continue;
                     }
                 };
@@ -74,19 +84,19 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                     doc_guard.sync().receive_sync_message(&mut sync_state, msg)?;
                     let heads_post_merge = doc_guard.get_heads();
 
-                    let bytes_to_save = {
-                        if heads_pre_merge != heads_post_merge {
-                            // FIXME: While the document is AutoCommit, we need a &mut to generate sync messages.
-                            //  This means that as soon as we wake up other client handlers, they will all try to
-                            //  acquire a write lock. When we change the document to Automerge this is no longer
-                            //  the case and all the tasks will be able to concurrently acquire a read lock.
-                            //  There is a .downgrade() method on a write guard so that we don't leave the critical section.
-                            let _ = state.sync_wake_up.send(());
+                    let bytes_to_save = if heads_pre_merge != heads_post_merge {
+                        info!("Applied sync changes (heads: {:?} -> {:?})", heads_pre_merge, heads_post_merge);
+                        // FIXME: While the document is AutoCommit, we need a &mut to generate sync messages.
+                        //  This means that as soon as we wake up other client handlers, they will all try to
+                        //  acquire a write lock. When we change the document to Automerge this is no longer
+                        //  the case and all the tasks will be able to concurrently acquire a read lock.
+                        //  There is a .downgrade() method on a write guard so that we don't leave the critical section.
+                        let _ = state.sync_wake_up.send(());
 
-                            Some(doc_guard.save())
-                        } else {
-                            None
-                        }
+                        Some(doc_guard.save())
+                    } else {
+                        debug!("Processed sync message (heads unchanged)");
+                        None
                     };
 
                     let response_msg = doc_guard.sync().generate_sync_message(&mut sync_state);
@@ -97,45 +107,45 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                 let save_fut = async {
                     if let Some(bytes_to_save) = bytes_to_save {
                         state.store.save_doc(&bytes_to_save).await?;
+                        debug!("Document was persisted to the database");
                     }
-                    Ok::<(), SocketHandlerError>(())
+                    Ok::<(), sqlx::Error>(())
                 };
 
                 let send_fut = async {
                     if let Some(response_msg) = response_msg {
                         sender.send(response_msg.encode().into()).await?;
+                        info!("Sent a sync response");
                     }
-                    Ok::<(), SocketHandlerError>(())
+                    Ok::<(), axum::Error>(())
                 };
 
                 let (save_res, send_res) = tokio::join!(save_fut, send_fut);
 
                 match (save_res, send_res) {
                     (Ok(()), Ok(())) => {}
-                    (Err(db_err), Ok(())) => return Err(db_err),
-                    (Ok(()), Err(ws_err)) => return Err(ws_err),
-                    (Err(db_err), Err(ws_err)) => {
-                        error!(
-                            "Both DB persistence ({}) and WebSocket send ({}) failed for client {}",
-                            db_err, ws_err, my_client_id
-                        );
-                        return Err(db_err);
+                    (Err(db_err), Ok(())) => return Err(SocketHandlerError::Database(db_err)),
+                    (Ok(()), Err(ws_err)) => return Err(SocketHandlerError::WebSocket(ws_err)),
+                    (Err(db), Err(ws)) => {
+                        return Err(SocketHandlerError::DatabaseAndWebSocket { db, ws });
                     }
                 }
             }
             wake_up_res = wake_up.changed() => {
                 wake_up_res?;
+                debug!("Woken up by changes in the document");
                 let sync_message = {
                     state.doc.write().await.sync().generate_sync_message(&mut sync_state)
                 };
                 if let Some(data) = sync_message {
                     sender.send(data.encode().into()).await?;
+                    info!("Sent a sync message");
                 }
             }
         }
     }
 
-    info!("Client {} disconnected", my_client_id);
+    info!("Disconnected");
 
     Ok(())
 }
