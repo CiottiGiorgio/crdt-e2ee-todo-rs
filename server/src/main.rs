@@ -1,4 +1,4 @@
-use automerge::AutoCommit;
+use automerge::Automerge;
 use axum::{extract::ws::WebSocketUpgrade, extract::State, routing::get, Router};
 use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,9 +21,7 @@ static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 #[derive(Clone)]
 struct AppState {
     store: SqliteSyncStore,
-    // FIXME: AutoCommit requires &mut for generating sync messages because it closes outstanding transactions.
-    //  This requires us to acquire a write lock which means we serialize all the updates to the clients.
-    doc: Arc<RwLock<AutoCommit>>,
+    doc: Arc<RwLock<Automerge>>,
     /// Wake-up signal carrying the id of the client whose change advanced the
     /// authoritative document, so other connections re-run the sync protocol.
     sync_wake_up: watch::Sender<()>,
@@ -51,9 +49,9 @@ async fn main() {
     // Load the authoritative automerge document from storage (or start fresh).
     let doc = match sync_store.load_doc().await {
         Ok(Some(bytes)) => {
-            AutoCommit::load(&bytes).expect("Failed to load persisted automerge document")
+            Automerge::load(&bytes).expect("Failed to load persisted automerge document")
         }
-        Ok(None) => AutoCommit::new(),
+        Ok(None) => Automerge::new(),
         Err(e) => panic!("Failed to load automerge document from storage: {}", e),
     };
 

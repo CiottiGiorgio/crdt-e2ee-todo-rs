@@ -72,25 +72,22 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                 let (bytes_to_save, response_msg) = {
                     let mut doc_guard = state.doc.write().await;
                     let heads_pre_merge = doc_guard.get_heads();
-                    doc_guard.sync().receive_sync_message(&mut sync_state, msg)?;
+                    doc_guard.receive_sync_message(&mut sync_state, msg)?;
+                    let doc_guard = doc_guard.downgrade();
                     let heads_post_merge = doc_guard.get_heads();
 
                     let bytes_to_save = if heads_pre_merge != heads_post_merge {
                         info!("Applied sync changes (heads: {:?} -> {:?})", heads_pre_merge, heads_post_merge);
-                        // FIXME: While the document is AutoCommit, we need a &mut to generate sync messages.
-                        //  This means that as soon as we wake up other client handlers, they will all try to
-                        //  acquire a write lock. When we change the document to Automerge this is no longer
-                        //  the case and all the tasks will be able to concurrently acquire a read lock.
-                        //  There is a .downgrade() method on a write guard so that we don't leave the critical section.
+                        let bytes = doc_guard.save();
                         let _ = state.sync_wake_up.send(());
 
-                        Some(doc_guard.save())
+                        Some(bytes)
                     } else {
                         debug!("Processed sync message (heads unchanged)");
                         None
                     };
 
-                    let response_msg = doc_guard.sync().generate_sync_message(&mut sync_state);
+                    let response_msg = doc_guard.generate_sync_message(&mut sync_state);
 
                     (bytes_to_save, response_msg)
                 };
@@ -126,7 +123,7 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                 wake_up_res?;
                 debug!("Woken up by changes in the document");
                 let sync_message = {
-                    state.doc.write().await.sync().generate_sync_message(&mut sync_state)
+                    state.doc.read().await.generate_sync_message(&mut sync_state)
                 };
                 if let Some(data) = sync_message {
                     sender.send(data.encode().into()).await?;
