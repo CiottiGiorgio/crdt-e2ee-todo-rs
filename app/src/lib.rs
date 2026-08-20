@@ -21,6 +21,8 @@ pub struct AppState {
     pub crypto: Arc<CryptoEngine>,
     pub sync_tx: tokio::sync::mpsc::UnboundedSender<()>,
     pub sync_status: Arc<std::sync::RwLock<models::SyncStatus>>,
+    pub sync_shutdown_tx: tokio::sync::watch::Sender<bool>,
+    pub sync_handle: Arc<tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -42,6 +44,21 @@ pub fn run() {
             }
         }));
     }
+
+    app_builder = app_builder.on_window_event(|window, event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let window = window.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = window.state::<AppState>();
+                let _ = state.sync_shutdown_tx.send(true);
+                if let Some(handle) = state.sync_handle.lock().await.take() {
+                    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+                }
+                let _ = window.destroy();
+            });
+        }
+    });
 
     app_builder
         .plugin(tauri_plugin_opener::init())
@@ -85,14 +102,16 @@ pub fn run() {
             );
 
             let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let sync_status = Arc::new(std::sync::RwLock::new(models::SyncStatus::Connecting));
 
-            tauri::async_runtime::spawn(sync::sync_engine(
+            let sync_handle = tauri::async_runtime::spawn(sync::sync_engine(
                 repo.clone(),
                 storage.clone(),
                 app.handle().clone(),
                 sync_status.clone(),
                 sync_rx,
+                shutdown_rx,
             ));
 
             app.manage(AppState {
@@ -101,6 +120,8 @@ pub fn run() {
                 crypto,
                 sync_tx,
                 sync_status,
+                sync_shutdown_tx: shutdown_tx,
+                sync_handle: Arc::new(tokio::sync::Mutex::new(Some(sync_handle))),
             });
 
             Ok(())

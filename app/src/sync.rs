@@ -6,7 +6,7 @@ use crate::models::SyncStatus;
 use crate::storage::SqliteStorage;
 use automerge::sync::State as SyncState;
 use constants::{RECONNECT_DELAY_SECS, WS_URL};
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use helper::send_sync_message;
 use std::sync::Arc;
 use tauri::Emitter;
@@ -45,6 +45,7 @@ pub async fn sync_engine(
     app_handle: tauri::AppHandle,
     sync_status: Arc<std::sync::RwLock<SyncStatus>>,
     mut rx: mpsc::UnboundedReceiver<()>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     let set_status = |status: SyncStatus| {
         if let Ok(mut lock) = sync_status.write() {
@@ -143,6 +144,15 @@ pub async fn sync_engine(
                     }
                 }
 
+                // Explicit shutdown signal
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        info!("Shutdown signal received: closing sync engine...");
+                        let _ = write.close().await;
+                        return;
+                    }
+                }
+
                 // Local change notification or shutdown when sender drops
                 change_msg = rx.recv() => {
                     match change_msg {
@@ -156,6 +166,7 @@ pub async fn sync_engine(
                         }
                         None => {
                             info!("Shutdown signal received: closing sync engine...");
+                            let _ = write.close().await;
                             return;
                         }
                     }
@@ -164,11 +175,19 @@ pub async fn sync_engine(
                 // Process shutdown signal (Ctrl+C)
                 _ = tokio::signal::ctrl_c() => {
                     info!("Shutdown signal (Ctrl+C) received: closing sync engine...");
+                    let _ = write.close().await;
                     return;
                 }
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)) => {}
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    return;
+                }
+            }
+        }
     }
 }

@@ -50,18 +50,9 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                 };
                 let data = match msg {
                     Message::Binary(data) => data,
-                    Message::Close(frame) => {
-                        debug!("Received a closing frame: {:?}", frame);
-                        break;
-                    }
-                    Message::Ping(_) => {
-                        debug!("Ping received");
-                        continue;
-                    },
-                    Message::Pong(_) => {
-                        debug!("Pong received");
-                        continue;
-                    },
+                    Message::Close(_) => break,
+                    Message::Ping(_) => continue,
+                    Message::Pong(_) => continue,
                     other => {
                         warn!("Received unexpected WebSocket message: {:?}", other);
                         continue;
