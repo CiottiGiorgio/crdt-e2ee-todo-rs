@@ -10,8 +10,8 @@ use futures::{SinkExt, StreamExt};
 use sqlx::sqlite::SqlitePoolOptions;
 use std::error::Error;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc};
-use tokio::sync::{broadcast, RwLock};
+use std::sync::Arc;
+use tokio::sync::{watch, RwLock};
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
 
@@ -30,7 +30,7 @@ struct AppState {
     doc: Arc<RwLock<AutoCommit>>,
     /// Wake-up signal carrying the id of the client whose change advanced the
     /// authoritative document, so other connections re-run the sync protocol.
-    sync_wake_up: broadcast::Sender<usize>,
+    sync_wake_up: watch::Sender<()>,
 }
 
 #[tokio::main]
@@ -61,7 +61,7 @@ async fn main() {
         Err(e) => panic!("Failed to load automerge document from storage: {}", e),
     };
 
-    let (tx, _rx) = broadcast::channel::<usize>(100);
+    let (tx, _rx) = watch::channel::<()>(());
     let state = AppState {
         store: sync_store,
         doc: Arc::new(RwLock::new(doc)),
@@ -138,7 +138,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Box<dyn
 
                 if heads_pre_merge != heads_post_merge {
                     state.store.save_doc(&doc_guard.save()).await?;
-                    let _ = state.sync_wake_up.send(my_client_id);
+                    let _ = state.sync_wake_up.send(());
                 }
 
                 let response_msg = doc_guard.sync().generate_sync_message(&mut sync_state);
@@ -146,11 +146,9 @@ async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Box<dyn
                     sender.send(msg.encode().into()).await?;
                 }
             }
-            Ok(waker_client_id) = wake_up.recv() => {
-                if waker_client_id != my_client_id {
-                    if let Some(data) = state.doc.write().await.sync().generate_sync_message(&mut sync_state) {
-                        sender.send(data.encode().into()).await?;
-                    }
+            Ok(_) = wake_up.changed() => {
+                if let Some(data) = state.doc.write().await.sync().generate_sync_message(&mut sync_state) {
+                    sender.send(data.encode().into()).await?;
                 }
             }
         }
