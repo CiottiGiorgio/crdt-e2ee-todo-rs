@@ -74,23 +74,53 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                     doc_guard.sync().receive_sync_message(&mut sync_state, msg)?;
                     let heads_post_merge = doc_guard.get_heads();
 
-                    let mut bytes_to_save = None;
-                    if heads_pre_merge != heads_post_merge {
-                        bytes_to_save = Some(doc_guard.save());
-                    }
+                    let bytes_to_save = {
+                        if heads_pre_merge != heads_post_merge {
+                            // FIXME: While the document is AutoCommit, we need a &mut to generate sync messages.
+                            //  This means that as soon as we wake up other client handlers, they will all try to
+                            //  acquire a write lock. When we change the document to Automerge this is no longer
+                            //  the case and all the tasks will be able to concurrently acquire a read lock.
+                            //  There is a .downgrade() method on a write guard so that we don't leave the critical section.
+                            let _ = state.sync_wake_up.send(());
+
+                            Some(doc_guard.save())
+                        } else {
+                            None
+                        }
+                    };
 
                     let response_msg = doc_guard.sync().generate_sync_message(&mut sync_state);
 
                     (bytes_to_save, response_msg)
                 };
 
-                if let Some(bytes_to_save) = bytes_to_save {
-                    state.store.save_doc(&bytes_to_save).await?;
-                    let _ = state.sync_wake_up.send(());
-                }
+                let save_fut = async {
+                    if let Some(bytes_to_save) = bytes_to_save {
+                        state.store.save_doc(&bytes_to_save).await?;
+                    }
+                    Ok::<(), SocketHandlerError>(())
+                };
 
-                if let Some(response_msg) = response_msg {
-                    sender.send(response_msg.encode().into()).await?;
+                let send_fut = async {
+                    if let Some(response_msg) = response_msg {
+                        sender.send(response_msg.encode().into()).await?;
+                    }
+                    Ok::<(), SocketHandlerError>(())
+                };
+
+                let (save_res, send_res) = tokio::join!(save_fut, send_fut);
+
+                match (save_res, send_res) {
+                    (Ok(()), Ok(())) => {}
+                    (Err(db_err), Ok(())) => return Err(db_err),
+                    (Ok(()), Err(ws_err)) => return Err(ws_err),
+                    (Err(db_err), Err(ws_err)) => {
+                        error!(
+                            "Both DB persistence ({}) and WebSocket send ({}) failed for client {}",
+                            db_err, ws_err, my_client_id
+                        );
+                        return Err(db_err);
+                    }
                 }
             }
             wake_up_res = wake_up.changed() => {
