@@ -6,6 +6,8 @@ mod models;
 pub mod storage;
 mod sync;
 
+mod sync_reworked;
+
 use automerge::AutomergeTodoRepo;
 use crypto::CryptoEngine;
 use std::sync::Arc;
