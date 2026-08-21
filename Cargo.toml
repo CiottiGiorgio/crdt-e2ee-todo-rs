@@ -2,7 +2,6 @@
 members = [
     "app",
     "server",
-    "shared",
 ]
 resolver = "2"
 

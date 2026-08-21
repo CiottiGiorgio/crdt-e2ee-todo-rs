@@ -28,7 +28,6 @@ async-trait = "0.1"
 specta = "2.0.0-rc.20"
 specta-typescript = "0.0.12"
 tauri-specta = { version = "2.0.0-rc.20", features = ["javascript", "typescript"] }
-shared = { path = "../shared" }
 aes-gcm = "0.11"
 rand = "0.10"
 tokio = { version = "1", features = ["full"] }
