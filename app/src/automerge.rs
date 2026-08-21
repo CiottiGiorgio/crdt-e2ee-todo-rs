@@ -78,7 +78,10 @@ impl DecryptedView {
 
     pub async fn get_all(&self) -> Result<Vec<TodoItem>, String> {
         let doc = self.doc.read().await;
-        let todos_obj = match doc.get(automerge::ROOT, "todos").map_err(|e| e.to_string())? {
+        let todos_obj = match doc
+            .get(automerge::ROOT, "todos")
+            .map_err(|e| e.to_string())?
+        {
             Some((Value::Object(ObjType::List), obj_id)) => obj_id,
             _ => return Ok(Vec::new()),
         };
@@ -118,7 +121,10 @@ impl DecryptedView {
         let mut doc = self.doc.write().await;
         let mut tx = doc.transaction();
 
-        let todos_obj = match tx.get(automerge::ROOT, "todos").map_err(|e| e.to_string())? {
+        let todos_obj = match tx
+            .get(automerge::ROOT, "todos")
+            .map_err(|e| e.to_string())?
+        {
             Some((Value::Object(ObjType::List), obj_id)) => obj_id,
             _ => tx
                 .put_object(automerge::ROOT, "todos", ObjType::List)
@@ -153,7 +159,10 @@ impl DecryptedView {
         let mut doc = self.doc.write().await;
         let mut tx = doc.transaction();
 
-        let todos_obj = match tx.get(automerge::ROOT, "todos").map_err(|e| e.to_string())? {
+        let todos_obj = match tx
+            .get(automerge::ROOT, "todos")
+            .map_err(|e| e.to_string())?
+        {
             Some((Value::Object(ObjType::List), obj_id)) => obj_id,
             _ => return Err(format!("Todo item with id {} not found", id)),
         };

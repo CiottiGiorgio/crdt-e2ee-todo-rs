@@ -18,7 +18,7 @@ use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, tungstenite, MaybeTlsStream, WebSocketStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Error)]
 enum SyncLoopError {
@@ -80,7 +80,7 @@ pub async fn sync_engine(
             )
             .await
             {
-                warn!("Sync loop ended with error: {}", err);
+                error!("Sync loop ended with error: {}", err);
             } else {
                 update_sync_status(&status, &app_handle, SyncStatus::Disconnected).await;
                 break;
@@ -109,11 +109,7 @@ async fn sync_loop(
     let (mut tx, mut rx) = connection.split();
     let mut server_state = AutomergeServerState::new();
 
-    if let Some(sync_handshake) = doc
-        .read()
-        .await
-        .generate_sync_message(&mut server_state)
-    {
+    if let Some(sync_handshake) = doc.read().await.generate_sync_message(&mut server_state) {
         tx.send(sync_handshake.encode().into()).await?;
     }
 
