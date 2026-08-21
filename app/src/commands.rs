@@ -7,7 +7,7 @@ use tauri_specta::{collect_commands, Builder};
 #[tauri::command]
 #[specta::specta]
 pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
-    Ok(state.sync_status.read().map_err(|e| e.to_string())?.clone())
+    Ok(state.sync_engine_status.read().await.clone())
 }
 
 #[tauri::command]
@@ -28,7 +28,7 @@ pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoIt
         .save(&doc_bytes)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = state.sync_tx.send(());
+    let _ = state.sync_engine_wake_up.send(());
     Ok(item)
 }
 
@@ -47,7 +47,7 @@ pub async fn update_todo_status(
         .save(&doc_bytes)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = state.sync_tx.send(());
+    let _ = state.sync_engine_wake_up.send(());
     Ok(())
 }
 
@@ -62,7 +62,7 @@ pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), S
         .save(&doc_bytes)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = state.sync_tx.send(());
+    let _ = state.sync_engine_wake_up.send(());
     Ok(())
 }
 

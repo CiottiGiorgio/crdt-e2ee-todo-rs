@@ -31,6 +31,9 @@ enum SyncLoopError {
     #[error("Automerge sync decode error: {0}")]
     SyncMessageDecode(#[from] automerge::sync::ReadMessageError),
 
+    #[error("Wake up signal error: {0}")]
+    WakeUp(#[from] tokio::sync::watch::error::RecvError),
+
     #[error("Automerge sync error: {0}")]
     Automerge(#[from] automerge::AutomergeError),
 
@@ -52,15 +55,14 @@ enum SyncLoopError {
 pub async fn sync_engine(
     doc: Arc<tokio::sync::RwLock<AutoCommit>>,
     storage: Arc<SqliteStorage>,
+    wake_up: tokio::sync::watch::Receiver<()>,
     cancellation_token: CancellationToken,
 ) {
     let mut wait_duration = EXP_BACKOFF_INITIAL_DURATION;
 
     // FIXME: If the sync_loop crashed because of db issues, it also dropped the websocket.
     //  However, after waiting, if we can acquire a websocket again the backoff duration resets.
-    //  This is not what we want. Ideally we'd be able to keep transacting with the server while
-    //  unable to persist changes. We'd also like to keep persisting the changes if we can't
-    //  connect to the server.
+    //  This is not ideal. We'd also like to keep persisting changes if we can't connect to the server.
     loop {
         info!("Attempting to connect to sync server at {}", WS_URL);
 
@@ -71,11 +73,14 @@ pub async fn sync_engine(
                 doc.clone(),
                 ws_stream,
                 storage.clone(),
+                wake_up.clone(),
                 cancellation_token.clone(),
             )
             .await
             {
                 warn!("Sync loop ended with error: {}", err);
+            } else {
+                break;
             }
         }
         sleep(wait_duration).await;
@@ -87,6 +92,7 @@ async fn sync_loop(
     doc: Arc<tokio::sync::RwLock<AutoCommit>>,
     connection: WebSocketStream<MaybeTlsStream<TcpStream>>,
     storage: Arc<SqliteStorage>,
+    mut wake_up: tokio::sync::watch::Receiver<()>,
     cancellation: CancellationToken,
 ) -> Result<(), SyncLoopError> {
     let (mut tx, mut rx) = connection.split();
@@ -164,6 +170,18 @@ async fn sync_loop(
                     (Err(db), Err(ws)) => {
                         return Err(SyncLoopError::DatabaseAndWebSocket { db, ws });
                     }
+                }
+            }
+
+            woken_up = wake_up.changed() => {
+                woken_up?;
+                if let Some(sync_msg) = doc
+                    .write()
+                    .await
+                    .sync()
+                    .generate_sync_message(&mut server_state)
+                {
+                    tx.send(sync_msg.encode().into()).await?;
                 }
             }
 

@@ -8,11 +8,13 @@ mod sync;
 
 mod sync_reworked;
 
+use crate::constants::TIMEOUT_GRACEFUL_SHUTDOWN_DURATION;
 use ::automerge::AutoCommit;
 use crypto::CryptoEngine;
 use std::sync::Arc;
 use storage::SqliteStorage;
 use tauri::Manager;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(not(debug_assertions))]
 use tracing::info;
@@ -21,13 +23,13 @@ pub struct AppState {
     // FIXME: Because AutoCommit takes a mut ref to generate a sync message (it commits pending transctions),
     //  we need to acquire a write lock when syncing state with the server.
     //  This is not ideal so we should consider Automerge docs instead of AutoCommit docs.
-    pub doc: Arc<tokio::sync::RwLock<AutoCommit>>,
-    pub storage: Arc<SqliteStorage>,
-    pub crypto: Arc<CryptoEngine>,
-    pub sync_tx: tokio::sync::mpsc::UnboundedSender<()>,
-    pub sync_status: Arc<std::sync::RwLock<models::SyncStatus>>,
-    pub sync_shutdown_tx: tokio::sync::watch::Sender<()>,
-    pub sync_handle: Arc<tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
+    doc: Arc<tokio::sync::RwLock<AutoCommit>>,
+    storage: Arc<SqliteStorage>,
+    crypto: Arc<CryptoEngine>,
+    sync_engine_wake_up: tokio::sync::watch::Sender<()>,
+    sync_engine_cancel_token: CancellationToken,
+    sync_engine_finished_token: CancellationToken,
+    sync_engine_status: Arc<tokio::sync::RwLock<models::SyncStatus>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -56,9 +58,10 @@ pub fn run() {
             let window = window.clone();
             tauri::async_runtime::spawn(async move {
                 let state = window.state::<AppState>();
-                let _ = state.sync_shutdown_tx.send(());
-                if let Some(handle) = state.sync_handle.lock().await.take() {
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
+                state.sync_engine_cancel_token.cancel();
+                tokio::select! {
+                    _ = state.sync_engine_finished_token.cancelled() => {}
+                    _ = tokio::time::sleep(TIMEOUT_GRACEFUL_SHUTDOWN_DURATION) => {}
                 }
                 let _ = window.destroy();
             });
@@ -107,27 +110,36 @@ pub fn run() {
             };
             let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
-            let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
-            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
-            let sync_status = Arc::new(std::sync::RwLock::new(models::SyncStatus::Connecting));
+            let (sync_engine_wake_up, sync_engine_wake_up_rx) = tokio::sync::watch::channel(());
+            let cancel_token = CancellationToken::new();
+            let finished_token = CancellationToken::new();
+            let sync_engine_status =
+                Arc::new(tokio::sync::RwLock::new(models::SyncStatus::Connecting));
 
-            let sync_handle = tauri::async_runtime::spawn(sync::sync_engine(
-                doc.clone(),
-                storage.clone(),
-                app.handle().clone(),
-                sync_status.clone(),
-                sync_rx,
-                shutdown_rx,
-            ));
+            let fin_token = finished_token.clone();
+            let c_token = cancel_token.clone();
+            let doc_clone = doc.clone();
+            let storage_clone = storage.clone();
+
+            tauri::async_runtime::spawn(async move {
+                sync_reworked::sync_engine(
+                    doc_clone,
+                    storage_clone,
+                    sync_engine_wake_up_rx,
+                    c_token,
+                )
+                .await;
+                fin_token.cancel();
+            });
 
             app.manage(AppState {
                 doc,
                 storage,
                 crypto,
-                sync_tx,
-                sync_status,
-                sync_shutdown_tx: shutdown_tx,
-                sync_handle: Arc::new(tokio::sync::Mutex::new(Some(sync_handle))),
+                sync_engine_wake_up,
+                sync_engine_cancel_token: cancel_token,
+                sync_engine_finished_token: finished_token,
+                sync_engine_status,
             });
 
             Ok(())
