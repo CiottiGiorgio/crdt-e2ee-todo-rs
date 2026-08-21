@@ -4,12 +4,15 @@ use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::sync::watch;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Error)]
 pub enum SocketHandlerError {
     #[error("Automerge sync error: {0}")]
     Automerge(#[from] automerge::AutomergeError),
+
+    #[error("Automerge sync decode error: {0}")]
+    SyncMessageDecode(#[from] automerge::sync::ReadMessageError),
 
     #[error("Database persistence error: {0}")]
     Database(#[from] sqlx::Error),
@@ -35,11 +38,7 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
         tokio::select! {
             msg_opt = receiver.next() => {
                 let msg = match msg_opt {
-                    Some(Ok(msg)) => { msg }
-                    Some(Err(e)) => {
-                        debug!("WebSocket read error: {}", e);
-                        break;
-                    }
+                    Some(res) => { res? }
                     None => {
                         debug!("Connection reached EOF");
                         break;
@@ -55,16 +54,8 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                         continue;
                     }
                 };
-                let msg = match SyncMessage::decode(&data) {
-                    Ok(msg) => {
-                        debug!("Received a sync message");
-                        msg
-                    },
-                    Err(e) => {
-                        error!("Failed to decode sync message {}", e);
-                        continue;
-                    }
-                };
+                let msg = SyncMessage::decode(&data)?;
+                debug!("Received a sync message");
 
                 let (bytes_to_save, response_msg) = {
                     let mut doc_guard = state.doc.write().await;
@@ -116,6 +107,7 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                     }
                 }
             }
+
             wake_up_res = wake_up.changed() => {
                 wake_up_res?;
                 debug!("Woken up by changes in the document");

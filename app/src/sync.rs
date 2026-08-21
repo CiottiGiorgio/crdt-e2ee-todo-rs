@@ -1,10 +1,10 @@
 mod constants;
 mod helper;
 
-use crate::automerge::AutomergeTodoRepo;
 use crate::models::SyncStatus;
 use crate::storage::SqliteStorage;
 use automerge::sync::State as SyncState;
+use automerge::{sync::SyncDoc, AutoCommit};
 use constants::{RECONNECT_DELAY_SECS, WS_URL};
 use futures_util::{SinkExt, StreamExt};
 use helper::send_sync_message;
@@ -25,7 +25,7 @@ use tracing::{error, info, warn};
 /// exactly once here anyway — one message per triggering event (inbound frame or
 /// local change), then the server must respond before more is generated.
 async fn send_outgoing<S>(
-    repo: &AutomergeTodoRepo,
+    doc: &tokio::sync::RwLock<AutoCommit>,
     state: &mut SyncState,
     write: &mut S,
 ) -> Result<(), String>
@@ -33,14 +33,19 @@ where
     S: futures_util::SinkExt<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
-    if let Some(data) = repo.generate_sync_message(state)? {
+    let mut doc_lock = doc.write().await;
+    let msg = doc_lock
+        .sync()
+        .generate_sync_message(state)
+        .map(|m| m.encode());
+    if let Some(data) = msg {
         send_sync_message(write, &data).await?;
     }
     Ok(())
 }
 
 pub async fn sync_engine(
-    repo: Arc<AutomergeTodoRepo>,
+    doc: Arc<tokio::sync::RwLock<AutoCommit>>,
     storage: Arc<SqliteStorage>,
     app_handle: tauri::AppHandle,
     sync_status: Arc<std::sync::RwLock<SyncStatus>>,
@@ -80,7 +85,7 @@ pub async fn sync_engine(
 
         // Drive the handshake: send our initial sync message(s) so the server
         // learns what we have and returns what we are missing.
-        if let Err(e) = send_outgoing(&repo, &mut sync_state, &mut write).await {
+        if let Err(e) = send_outgoing(&doc, &mut sync_state, &mut write).await {
             error!("Failed to send initial sync message to server: {}", e);
             set_status(SyncStatus::Disconnected);
             tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
@@ -110,12 +115,13 @@ pub async fn sync_engine(
                         }
                     };
 
-                    let changed = match repo.receive_sync_message(&mut sync_state, &data) {
-                        Ok(changed) => changed,
-                        Err(e) => {
-                            error!("Failed to apply incoming sync message: {}", e);
-                            continue;
-                        }
+                    let changed = {
+                        let mut doc_lock = doc.write().await;
+                        let heads_before = doc_lock.get_heads();
+                        let msg = automerge::sync::Message::decode(&data).unwrap();
+                        doc_lock.sync().receive_sync_message(&mut sync_state, msg).unwrap();
+                        let heads_after = doc_lock.get_heads();
+                        heads_before != heads_after
                     };
 
                     // Only persist and notify the frontend when the sync message
@@ -125,7 +131,7 @@ pub async fn sync_engine(
                     if changed {
                         // Persist the updated document (plaintext structure,
                         // ciphertext values) at rest.
-                        let doc_bytes = repo.get_doc_bytes();
+                        let doc_bytes = doc.write().await.save();
                         if let Err(e) = storage.save(&doc_bytes).await {
                             error!("Failed to persist document after applying sync message: {}", e);
                         }
@@ -137,7 +143,7 @@ pub async fn sync_engine(
                     }
 
                     // Respond with any follow-up messages the protocol needs.
-                    if let Err(e) = send_outgoing(&repo, &mut sync_state, &mut write).await {
+                    if let Err(e) = send_outgoing(&doc, &mut sync_state, &mut write).await {
                         error!("Failed to send follow-up sync messages: {}", e);
                         set_status(SyncStatus::Disconnected);
                         break;
@@ -155,7 +161,7 @@ pub async fn sync_engine(
                 change_msg = rx.recv() => {
                     match change_msg {
                         Some(_) => {
-                            if let Err(e) = send_outgoing(&repo, &mut sync_state, &mut write).await {
+                            if let Err(e) = send_outgoing(&doc, &mut sync_state, &mut write).await {
                                 error!("Failed to push local changes to server: {}", e);
                                 set_status(SyncStatus::Disconnected);
                                 break;

@@ -8,7 +8,7 @@ mod sync;
 
 mod sync_reworked;
 
-use automerge::AutomergeTodoRepo;
+use ::automerge::AutoCommit;
 use crypto::CryptoEngine;
 use std::sync::Arc;
 use storage::SqliteStorage;
@@ -18,7 +18,10 @@ use tauri::Manager;
 use tracing::info;
 
 pub struct AppState {
-    pub repo: Arc<AutomergeTodoRepo>,
+    // FIXME: Because AutoCommit takes a mut ref to generate a sync message (it commits pending transctions),
+    //  we need to acquire a write lock when syncing state with the server.
+    //  This is not ideal so we should consider Automerge docs instead of AutoCommit docs.
+    pub doc: Arc<tokio::sync::RwLock<AutoCommit>>,
     pub storage: Arc<SqliteStorage>,
     pub crypto: Arc<CryptoEngine>,
     pub sync_tx: tokio::sync::mpsc::UnboundedSender<()>,
@@ -98,17 +101,18 @@ pub fn run() {
             let stored_data = tauri::async_runtime::block_on(storage.load())
                 .expect("failed to load data from storage");
 
-            let repo = Arc::new(
-                AutomergeTodoRepo::new(stored_data, crypto.clone())
-                    .expect("failed to initialize automerge repository"),
-            );
+            let doc = match stored_data {
+                Some(data) => AutoCommit::load(&data).expect("failed to load doc"),
+                None => AutoCommit::new(),
+            };
+            let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
             let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
             let sync_status = Arc::new(std::sync::RwLock::new(models::SyncStatus::Connecting));
 
             let sync_handle = tauri::async_runtime::spawn(sync::sync_engine(
-                repo.clone(),
+                doc.clone(),
                 storage.clone(),
                 app.handle().clone(),
                 sync_status.clone(),
@@ -117,7 +121,7 @@ pub fn run() {
             ));
 
             app.manage(AppState {
-                repo,
+                doc,
                 storage,
                 crypto,
                 sync_tx,

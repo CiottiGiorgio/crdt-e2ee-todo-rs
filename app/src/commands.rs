@@ -1,3 +1,4 @@
+use crate::automerge::DecryptedView;
 use crate::models::{SyncStatus, TodoItem, TodoStatus};
 use crate::AppState;
 use tauri::State;
@@ -12,14 +13,21 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, S
 #[tauri::command]
 #[specta::specta]
 pub async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, String> {
-    state.repo.get_all().await
+    let view = DecryptedView::new(state.doc.clone(), state.crypto.clone());
+    view.get_all().await
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoItem, String> {
-    let (item, doc_bytes) = state.repo.add(text).await?;
-    state.storage.save(&doc_bytes).await?;
+    let view = DecryptedView::new(state.doc.clone(), state.crypto.clone());
+    let item = view.add(text).await?;
+    let doc_bytes = view.get_doc_bytes().await;
+    state
+        .storage
+        .save(&doc_bytes)
+        .await
+        .map_err(|e| e.to_string())?;
     let _ = state.sync_tx.send(());
     Ok(item)
 }
@@ -31,8 +39,14 @@ pub async fn update_todo_status(
     status: TodoStatus,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let doc_bytes = state.repo.update_status(id, status).await?;
-    state.storage.save(&doc_bytes).await?;
+    let view = DecryptedView::new(state.doc.clone(), state.crypto.clone());
+    view.update_status(id, status).await?;
+    let doc_bytes = view.get_doc_bytes().await;
+    state
+        .storage
+        .save(&doc_bytes)
+        .await
+        .map_err(|e| e.to_string())?;
     let _ = state.sync_tx.send(());
     Ok(())
 }
@@ -40,8 +54,14 @@ pub async fn update_todo_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let doc_bytes = state.repo.delete(id).await?;
-    state.storage.save(&doc_bytes).await?;
+    let view = DecryptedView::new(state.doc.clone(), state.crypto.clone());
+    view.delete(id).await?;
+    let doc_bytes = view.get_doc_bytes().await;
+    state
+        .storage
+        .save(&doc_bytes)
+        .await
+        .map_err(|e| e.to_string())?;
     let _ = state.sync_tx.send(());
     Ok(())
 }
