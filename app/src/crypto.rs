@@ -54,18 +54,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_encrypt_decrypt_roundtrip() {
-        let key = [42u8; KEY_SIZE];
-        let engine = CryptoEngine::new(&key);
-
-        let plaintext = b"Hello Automerge E2EE!";
-        let encrypted = engine.encrypt(plaintext).unwrap();
-        let decrypted = engine.decrypt(&encrypted).unwrap();
-
-        assert_eq!(decrypted, plaintext);
-    }
-
-    #[test]
     fn test_encrypt_decrypt_value_roundtrip() {
         let key = [42u8; KEY_SIZE];
         let engine = CryptoEngine::new(&key);

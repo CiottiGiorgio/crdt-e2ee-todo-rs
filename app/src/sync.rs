@@ -4,7 +4,7 @@ mod helper;
 use crate::models::SyncStatus;
 use crate::storage::SqliteStorage;
 use automerge::sync::{Message as SyncMessage, State as AutomergeServerState, SyncDoc};
-use automerge::AutoCommit;
+use automerge::Automerge;
 use constants::{
     EXP_BACKOFF_FACTOR, EXP_BACKOFF_INITIAL_DURATION, EXP_BACKOFF_MAX_DURATION, WS_URL,
 };
@@ -50,7 +50,7 @@ enum SyncLoopError {
 // TODO: We are missing:
 //  - A decision on whether a SQLite error is fatal.
 pub async fn sync_engine(
-    doc: Arc<tokio::sync::RwLock<AutoCommit>>,
+    doc: Arc<tokio::sync::RwLock<Automerge>>,
     app_handle: tauri::AppHandle,
     storage: Arc<SqliteStorage>,
     wake_up: tokio::sync::watch::Receiver<()>,
@@ -99,7 +99,7 @@ pub async fn sync_engine(
 }
 
 async fn sync_loop(
-    doc: Arc<tokio::sync::RwLock<AutoCommit>>,
+    doc: Arc<tokio::sync::RwLock<Automerge>>,
     app_handle: tauri::AppHandle,
     connection: WebSocketStream<MaybeTlsStream<TcpStream>>,
     storage: Arc<SqliteStorage>,
@@ -110,9 +110,8 @@ async fn sync_loop(
     let mut server_state = AutomergeServerState::new();
 
     if let Some(sync_handshake) = doc
-        .write()
+        .read()
         .await
-        .sync()
         .generate_sync_message(&mut server_state)
     {
         tx.send(sync_handshake.encode().into()).await?;
@@ -140,7 +139,8 @@ async fn sync_loop(
                 let (bytes_to_save, response_msg) = {
                     let mut doc_guard = doc.write().await;
                     let heads_pre_merge = doc_guard.get_heads();
-                    doc_guard.sync().receive_sync_message(&mut server_state, msg)?;
+                    doc_guard.receive_sync_message(&mut server_state, msg)?;
+                    let doc_guard = doc_guard.downgrade();
                     let heads_post_merge = doc_guard.get_heads();
 
                     let bytes_to_save = if heads_pre_merge != heads_post_merge {
@@ -151,7 +151,7 @@ async fn sync_loop(
                         None
                     };
 
-                    let response_msg = doc_guard.sync().generate_sync_message(&mut server_state);
+                    let response_msg = doc_guard.generate_sync_message(&mut server_state);
 
                     (bytes_to_save, response_msg)
                 };
@@ -188,9 +188,8 @@ async fn sync_loop(
             woken_up = wake_up.changed() => {
                 woken_up?;
                 if let Some(sync_msg) = doc
-                    .write()
+                    .read()
                     .await
-                    .sync()
                     .generate_sync_message(&mut server_state)
                 {
                     tx.send(sync_msg.encode().into()).await?;

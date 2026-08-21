@@ -7,7 +7,7 @@ pub mod storage;
 mod sync;
 
 use crate::constants::TIMEOUT_GRACEFUL_SHUTDOWN_DURATION;
-use ::automerge::AutoCommit;
+use ::automerge::Automerge;
 use crypto::CryptoEngine;
 use std::sync::Arc;
 use storage::SqliteStorage;
@@ -18,10 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub struct AppState {
-    // FIXME: Because AutoCommit takes a mut ref to generate a sync message (it commits pending transctions),
-    //  we need to acquire a write lock when syncing state with the server.
-    //  This is not ideal so we should consider Automerge docs instead of AutoCommit docs.
-    doc: Arc<tokio::sync::RwLock<AutoCommit>>,
+    doc: Arc<tokio::sync::RwLock<Automerge>>,
     storage: Arc<SqliteStorage>,
     crypto: Arc<CryptoEngine>,
     sync_engine_wake_up: tokio::sync::watch::Sender<()>,
@@ -103,8 +100,8 @@ pub fn run() {
                 .expect("failed to load data from storage");
 
             let doc = match stored_data {
-                Some(data) => AutoCommit::load(&data).expect("failed to load doc"),
-                None => AutoCommit::new(),
+                Some(data) => Automerge::load(&data).expect("failed to load doc"),
+                None => Automerge::new(),
             };
             let doc = Arc::new(tokio::sync::RwLock::new(doc));
 

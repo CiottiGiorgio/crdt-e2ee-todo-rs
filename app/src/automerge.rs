@@ -1,5 +1,5 @@
 use automerge::transaction::Transactable;
-use automerge::{AutoCommit, ObjType, ReadDoc, ScalarValue, Value};
+use automerge::{Automerge, ObjType, ReadDoc, ScalarValue, Value};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -9,12 +9,12 @@ use crate::models::{TodoItem, TodoStatus};
 
 #[derive(Clone)]
 pub struct DecryptedView {
-    pub doc: Arc<RwLock<AutoCommit>>,
+    pub doc: Arc<RwLock<Automerge>>,
     pub crypto: Arc<CryptoEngine>,
 }
 
 impl DecryptedView {
-    pub fn new(doc: Arc<RwLock<AutoCommit>>, crypto: Arc<CryptoEngine>) -> Self {
+    pub fn new(doc: Arc<RwLock<Automerge>>, crypto: Arc<CryptoEngine>) -> Self {
         Self { doc, crypto }
     }
 
@@ -38,7 +38,7 @@ impl DecryptedView {
     }
 
     fn get_str_from_doc(
-        doc: &AutoCommit,
+        doc: &Automerge,
         crypto: &CryptoEngine,
         item_obj: &automerge::ObjId,
         key: &str,
@@ -58,7 +58,7 @@ impl DecryptedView {
     }
 
     pub async fn get_doc_bytes(&self) -> Vec<u8> {
-        let mut doc = self.doc.write().await;
+        let doc = self.doc.read().await;
         doc.save()
     }
 
@@ -93,8 +93,9 @@ impl DecryptedView {
 
     pub async fn add(&self, text: String) -> Result<TodoItem, String> {
         let mut doc = self.doc.write().await;
+        let mut tx = doc.transaction();
         let id = Uuid::new_v4().to_string();
-        let item_obj = doc
+        let item_obj = tx
             .put_object(automerge::ROOT, &id, ObjType::Map)
             .map_err(|e| e.to_string())?;
 
@@ -104,10 +105,12 @@ impl DecryptedView {
             .crypto
             .encrypt_value(Self::status_to_str(status).as_bytes())?;
 
-        doc.put(&item_obj, "text", ScalarValue::Bytes(enc_text))
+        tx.put(&item_obj, "text", ScalarValue::Bytes(enc_text))
             .map_err(|e| e.to_string())?;
-        doc.put(&item_obj, "status", ScalarValue::Bytes(enc_status))
+        tx.put(&item_obj, "status", ScalarValue::Bytes(enc_status))
             .map_err(|e| e.to_string())?;
+
+        tx.commit();
 
         Ok(TodoItem { id, text, status })
     }
@@ -117,11 +120,13 @@ impl DecryptedView {
         if let Some((Value::Object(ObjType::Map), item_obj)) =
             doc.get(automerge::ROOT, &id).map_err(|e| e.to_string())?
         {
+            let mut tx = doc.transaction();
             let enc_status = self
                 .crypto
                 .encrypt_value(Self::status_to_str(status).as_bytes())?;
-            doc.put(&item_obj, "status", ScalarValue::Bytes(enc_status))
+            tx.put(&item_obj, "status", ScalarValue::Bytes(enc_status))
                 .map_err(|e| e.to_string())?;
+            tx.commit();
             Ok(())
         } else {
             Err(format!("Todo item with id {} not found", id))
