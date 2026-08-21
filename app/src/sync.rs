@@ -1,195 +1,193 @@
 mod constants;
-mod helper;
 
-use crate::models::SyncStatus;
 use crate::storage::SqliteStorage;
-use automerge::sync::State as SyncState;
-use automerge::{sync::SyncDoc, AutoCommit};
-use constants::{RECONNECT_DELAY_SECS, WS_URL};
+use automerge::sync::{Message as SyncMessage, State as AutomergeServerState, SyncDoc};
+use automerge::AutoCommit;
+use constants::{
+    EXP_BACKOFF_FACTOR, EXP_BACKOFF_INITIAL_DURATION, EXP_BACKOFF_MAX_DURATION, WS_URL,
+};
 use futures_util::{SinkExt, StreamExt};
-use helper::send_sync_message;
+use std::cmp::min;
 use std::sync::Arc;
-use tauri::Emitter;
-use tokio::sync::mpsc;
-use tokio::time::Duration;
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use tracing::{error, info, warn};
+use thiserror::Error;
+use tokio::net::TcpStream;
+use tokio::time::sleep;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, tungstenite, MaybeTlsStream, WebSocketStream};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
-/// Sends this peer's pending outgoing sync message (if any) over the WebSocket
-/// as a binary frame.
-///
-/// This is single-shot rather than a drain loop: after `generate_sync_message`
-/// emits a message it sets the peer `state`'s `in_flight` flag, which is only
-/// cleared by `receive_sync_message`. With no intervening receive, an immediate
-/// second call is guaranteed to return `None`, so a `while let` would iterate
-/// exactly once here anyway — one message per triggering event (inbound frame or
-/// local change), then the server must respond before more is generated.
-async fn send_outgoing<S>(
-    doc: &tokio::sync::RwLock<AutoCommit>,
-    state: &mut SyncState,
-    write: &mut S,
-) -> Result<(), String>
-where
-    S: futures_util::SinkExt<Message> + Unpin,
-    S::Error: std::fmt::Display,
-{
-    let mut doc_lock = doc.write().await;
-    let msg = doc_lock
-        .sync()
-        .generate_sync_message(state)
-        .map(|m| m.encode());
-    if let Some(data) = msg {
-        send_sync_message(write, &data).await?;
-    }
-    Ok(())
+#[derive(Debug, Error)]
+enum SyncLoopError {
+    #[error("Websocket transport error: {0}")]
+    WebSocket(#[from] tungstenite::Error),
+
+    #[error("Server closed the connection")]
+    ServerClosedConnection,
+
+    #[error("Automerge sync decode error: {0}")]
+    SyncMessageDecode(#[from] automerge::sync::ReadMessageError),
+
+    #[error("Wake up signal error: {0}")]
+    WakeUp(#[from] tokio::sync::watch::error::RecvError),
+
+    #[error("Automerge sync error: {0}")]
+    Automerge(#[from] automerge::AutomergeError),
+
+    #[error("Database persistence error: {0}")]
+    Database(#[from] sqlx::Error),
+
+    #[error("Database persistence ({db}) and WebSocket transport ({ws}) both failed")]
+    DatabaseAndWebSocket {
+        db: sqlx::Error,
+        ws: tungstenite::Error,
+    },
 }
 
+// TODO: We are missing:
+//  - A way for the sync engine to fire an event to the UI when it syncs with the server.
+//  - A decision on whether a SQLite error is fatal.
+//  - A way to signal the sync engine current status to the UI.
 pub async fn sync_engine(
     doc: Arc<tokio::sync::RwLock<AutoCommit>>,
     storage: Arc<SqliteStorage>,
-    app_handle: tauri::AppHandle,
-    sync_status: Arc<std::sync::RwLock<SyncStatus>>,
-    mut rx: mpsc::UnboundedReceiver<()>,
-    mut shutdown_rx: tokio::sync::watch::Receiver<()>,
+    wake_up: tokio::sync::watch::Receiver<()>,
+    cancellation_token: CancellationToken,
 ) {
-    let set_status = |status: SyncStatus| {
-        if let Ok(mut lock) = sync_status.write() {
-            *lock = status.clone();
+    let mut wait_duration = EXP_BACKOFF_INITIAL_DURATION;
+
+    // FIXME: If the sync_loop crashed because of db issues, it also dropped the websocket.
+    //  However, after waiting, if we can acquire a websocket again the backoff duration resets.
+    //  This is not ideal. We'd also like to keep persisting changes if we can't connect to the server.
+    loop {
+        info!("Attempting to connect to sync server at {}", WS_URL);
+
+        if let Ok((ws_stream, _)) = connect_async(WS_URL).await {
+            info!("Connected to sync server");
+            wait_duration = EXP_BACKOFF_INITIAL_DURATION;
+            if let Err(err) = sync_loop(
+                doc.clone(),
+                ws_stream,
+                storage.clone(),
+                wake_up.clone(),
+                cancellation_token.clone(),
+            )
+            .await
+            {
+                warn!("Sync loop ended with error: {}", err);
+            } else {
+                break;
+            }
         }
-        let _ = app_handle.emit("sync-status", status);
-    };
+        sleep(wait_duration).await;
+        wait_duration = min(wait_duration * EXP_BACKOFF_FACTOR, EXP_BACKOFF_MAX_DURATION);
+    }
+}
+
+async fn sync_loop(
+    doc: Arc<tokio::sync::RwLock<AutoCommit>>,
+    connection: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    storage: Arc<SqliteStorage>,
+    mut wake_up: tokio::sync::watch::Receiver<()>,
+    cancellation: CancellationToken,
+) -> Result<(), SyncLoopError> {
+    let (mut tx, mut rx) = connection.split();
+    let mut server_state = AutomergeServerState::new();
+
+    if let Some(sync_handshake) = doc
+        .write()
+        .await
+        .sync()
+        .generate_sync_message(&mut server_state)
+    {
+        tx.send(sync_handshake.encode().into()).await?;
+    }
 
     loop {
-        set_status(SyncStatus::Connecting);
-        info!("Attempting to connect to sync server at {}", WS_URL);
-        let (ws_stream, _) = match connect_async(WS_URL).await {
-            Ok(res) => res,
-            Err(e) => {
-                warn!(
-                    "Sync server not available ({}). Retrying in {} seconds...",
-                    e, RECONNECT_DELAY_SECS
-                );
-                set_status(SyncStatus::Disconnected);
-                tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
-                continue;
-            }
-        };
-
-        info!("Connected to sync server!");
-        let (mut write, mut read) = ws_stream.split();
-
-        // A fresh sync state is created per connection; peers renegotiate from
-        // scratch on reconnect (no head bookkeeping is persisted).
-        let mut sync_state = SyncState::new();
-        set_status(SyncStatus::Connected);
-
-        // Drive the handshake: send our initial sync message(s) so the server
-        // learns what we have and returns what we are missing.
-        if let Err(e) = send_outgoing(&doc, &mut sync_state, &mut write).await {
-            error!("Failed to send initial sync message to server: {}", e);
-            set_status(SyncStatus::Disconnected);
-            tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)).await;
-            continue;
-        }
-
-        loop {
-            tokio::select! {
-                // Incoming binary sync message from server
-                Some(msg) = read.next() => {
-                    let data = match msg {
-                        Ok(Message::Binary(data)) => data,
-                        Ok(Message::Close(frame)) => {
-                            warn!("Server WebSocket closed connection: {:?}", frame);
-                            set_status(SyncStatus::Disconnected);
-                            break;
-                        }
-                        Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => continue,
-                        Ok(other) => {
-                            warn!("Received unexpected WebSocket message: {:?}", other);
-                            continue;
-                        }
-                        Err(e) => {
-                            error!("WebSocket read error: {}", e);
-                            set_status(SyncStatus::Disconnected);
-                            break;
-                        }
-                    };
-
-                    let changed = {
-                        let mut doc_lock = doc.write().await;
-                        let heads_before = doc_lock.get_heads();
-                        let msg = automerge::sync::Message::decode(&data).unwrap();
-                        doc_lock.sync().receive_sync_message(&mut sync_state, msg).unwrap();
-                        let heads_after = doc_lock.get_heads();
-                        heads_before != heads_after
-                    };
-
-                    // Only persist and notify the frontend when the sync message
-                    // actually advanced the document. Protocol-only exchanges
-                    // (e.g. acknowledgements after our own local change) leave the
-                    // document untouched and must not echo a `todos-updated` event.
-                    if changed {
-                        // Persist the updated document (plaintext structure,
-                        // ciphertext values) at rest.
-                        let doc_bytes = doc.write().await.save();
-                        if let Err(e) = storage.save(&doc_bytes).await {
-                            error!("Failed to persist document after applying sync message: {}", e);
-                        }
-
-                        info!("Applied incoming sync message");
-                        if let Err(e) = app_handle.emit("todos-updated", ()) {
-                            error!("Failed to emit todos-updated event: {}", e);
-                        }
-                    }
-
-                    // Respond with any follow-up messages the protocol needs.
-                    if let Err(e) = send_outgoing(&doc, &mut sync_state, &mut write).await {
-                        error!("Failed to send follow-up sync messages: {}", e);
-                        set_status(SyncStatus::Disconnected);
-                        break;
-                    }
-                }
-
-                // Explicit shutdown signal
-                _ = shutdown_rx.changed() => {
-                    info!("Shutdown signal received: closing sync engine...");
-                    let _ = write.close().await;
-                    return;
-                }
-
-                // Local change notification or shutdown when sender drops
-                change_msg = rx.recv() => {
-                    match change_msg {
-                        Some(_) => {
-                            if let Err(e) = send_outgoing(&doc, &mut sync_state, &mut write).await {
-                                error!("Failed to push local changes to server: {}", e);
-                                set_status(SyncStatus::Disconnected);
-                                break;
-                            }
-                            info!("Pushed local changes immediately to server!");
-                        }
-                        None => {
-                            info!("Shutdown signal received: closing sync engine...");
-                            let _ = write.close().await;
-                            return;
-                        }
-                    }
-                }
-
-                // Process shutdown signal (Ctrl+C)
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Shutdown signal (Ctrl+C) received: closing sync engine...");
-                    let _ = write.close().await;
-                    return;
-                }
-            }
-        }
-
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)) => {}
-            _ = shutdown_rx.changed() => {
-                return;
+            msg = rx.next() => {
+                let msg = match msg {
+                    Some(msg) => msg,
+                    None => return Err(SyncLoopError::ServerClosedConnection),
+                };
+                let data = match msg? {
+                    Message::Binary(data) => data,
+                    Message::Close(_) => return Err(SyncLoopError::ServerClosedConnection),
+                    Message::Ping(_) | Message::Pong(_) => continue,
+                    other => {
+                        warn!("Received unexpected WebSocket message: {:?}", other);
+                        continue;
+                    }
+                };
+                let msg = SyncMessage::decode(&data)?;
+                debug!("Received a sync message");
+
+                let (bytes_to_save, response_msg) = {
+                    let mut doc_guard = doc.write().await;
+                    let heads_pre_merge = doc_guard.get_heads();
+                    doc_guard.sync().receive_sync_message(&mut server_state, msg)?;
+                    let heads_post_merge = doc_guard.get_heads();
+
+                    let bytes_to_save = if heads_pre_merge != heads_post_merge {
+                        info!("Applied sync changes (heads: {:?} -> {:?}", heads_pre_merge, heads_post_merge);
+                        Some(doc_guard.save())
+                    } else {
+                        debug!("Processed sync message (heads unchanged)");
+                        None
+                    };
+
+                    let response_msg = doc_guard.sync().generate_sync_message(&mut server_state);
+
+                    (bytes_to_save, response_msg)
+                };
+
+                let save_fut = async {
+                    if let Some(bytes_to_save) = bytes_to_save {
+                        storage.save(&bytes_to_save).await?;
+                        debug!("Document was persisted to the database");
+                    }
+                    Ok::<(), sqlx::Error>(())
+                };
+
+                let send_fut = async {
+                    if let Some(response_msg) = response_msg {
+                        tx.send(response_msg.encode().into()).await?;
+                        info!("Sent a sync response");
+                    }
+                    Ok::<(), tungstenite::Error>(())
+                };
+
+                let (save_res, send_res) = tokio::join!(save_fut, send_fut);
+
+                match (save_res, send_res) {
+                    (Ok(()), Ok(())) => {}
+                    (Err(db_err), Ok(())) => return Err(SyncLoopError::Database(db_err)),
+                    (Ok(()), Err(ws_err)) => return Err(SyncLoopError::WebSocket(ws_err)),
+                    (Err(db), Err(ws)) => {
+                        return Err(SyncLoopError::DatabaseAndWebSocket { db, ws });
+                    }
+                }
+            }
+
+            woken_up = wake_up.changed() => {
+                woken_up?;
+                if let Some(sync_msg) = doc
+                    .write()
+                    .await
+                    .sync()
+                    .generate_sync_message(&mut server_state)
+                {
+                    tx.send(sync_msg.encode().into()).await?;
+                }
+            }
+
+            _ = cancellation.cancelled() => {
+                info!("Cancellation was requested");
+                break;
             }
         }
     }
+
+    let _ = tx.close().await;
+    Ok(())
 }

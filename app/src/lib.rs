@@ -6,8 +6,6 @@ mod models;
 pub mod storage;
 mod sync;
 
-mod sync_reworked;
-
 use crate::constants::TIMEOUT_GRACEFUL_SHUTDOWN_DURATION;
 use ::automerge::AutoCommit;
 use crypto::CryptoEngine;
@@ -122,13 +120,7 @@ pub fn run() {
             let storage_clone = storage.clone();
 
             tauri::async_runtime::spawn(async move {
-                sync_reworked::sync_engine(
-                    doc_clone,
-                    storage_clone,
-                    sync_engine_wake_up_rx,
-                    c_token,
-                )
-                .await;
+                sync::sync_engine(doc_clone, storage_clone, sync_engine_wake_up_rx, c_token).await;
                 fin_token.cancel();
             });
 
