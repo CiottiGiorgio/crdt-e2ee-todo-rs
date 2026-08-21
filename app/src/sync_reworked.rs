@@ -21,9 +21,6 @@ const EXP_BACKOFF_FACTOR: u32 = 2;
 const EXP_BACKOFF_MAX_DURATION: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Error)]
-pub enum SyncEngineError {}
-
-#[derive(Debug, Error)]
 enum SyncLoopError {
     #[error("Websocket transport error: {0}")]
     WebSocket(#[from] tungstenite::Error),
@@ -56,14 +53,21 @@ pub async fn sync_engine(
     doc: Arc<tokio::sync::RwLock<AutoCommit>>,
     storage: Arc<SqliteStorage>,
     cancellation_token: CancellationToken,
-) -> Result<(), SyncEngineError> {
+) {
     let mut wait_duration = EXP_BACKOFF_INITIAL_DURATION;
 
+    // FIXME: If the sync_loop crashed because of db issues, it also dropped the websocket.
+    //  However, after waiting, if we can acquire a websocket again the backoff duration resets.
+    //  This is not what we want. Ideally we'd be able to keep transacting with the server while
+    //  unable to persist changes. We'd also like to keep persisting the changes if we can't
+    //  connect to the server.
     loop {
         info!("Attempting to connect to sync server at {}", WS_URL);
+
         if let Ok((ws_stream, _)) = connect_async(WS_URL).await {
             info!("Connected to sync server");
-            match sync_loop(
+            wait_duration = EXP_BACKOFF_INITIAL_DURATION;
+            if let Err(err) = sync_loop(
                 doc.clone(),
                 ws_stream,
                 storage.clone(),
@@ -71,23 +75,7 @@ pub async fn sync_engine(
             )
             .await
             {
-                Ok(_) => return Ok(()),
-
-                // TODO: Propagate errors not related to connection issues.
-                //  Fall through on errors related to connection issues.
-                // Should these log statements be error or info?
-                Err(SyncLoopError::WebSocket(e)) => {
-                    debug!("{}", e);
-                }
-                Err(SyncLoopError::ServerClosedConnection) => {
-                    debug!("Server unexpectedly closed the connection");
-                }
-                Err(SyncLoopError::SyncMessageDecode(e)) => {
-                    debug!("Could not decode sync message");
-                }
-                Err(SyncLoopError::Automerge(_))
-                | Err(SyncLoopError::Database(_))
-                | Err(SyncLoopError::DatabaseAndWebSocket { .. }) => break,
+                warn!("Sync loop ended with error: {}", err);
             }
         }
         sleep(wait_duration).await;
@@ -115,7 +103,11 @@ async fn sync_loop(
 
     loop {
         tokio::select! {
-            Some(msg) = rx.next() => {
+            msg = rx.next() => {
+                let msg = match msg {
+                    Some(msg) => msg,
+                    None => return Err(SyncLoopError::ServerClosedConnection),
+                };
                 let data = match msg? {
                     Message::Binary(data) => data,
                     Message::Close(_) => return Err(SyncLoopError::ServerClosedConnection),
@@ -178,9 +170,10 @@ async fn sync_loop(
             _ = cancellation.cancelled() => {
                 info!("Cancellation was requested");
                 break;
-            },
+            }
         }
     }
 
+    let _ = tx.close().await;
     Ok(())
 }
