@@ -45,7 +45,7 @@ pub async fn sync_engine(
     app_handle: tauri::AppHandle,
     sync_status: Arc<std::sync::RwLock<SyncStatus>>,
     mut rx: mpsc::UnboundedReceiver<()>,
-    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<()>,
 ) {
     let set_status = |status: SyncStatus| {
         if let Ok(mut lock) = sync_status.write() {
@@ -146,11 +146,9 @@ pub async fn sync_engine(
 
                 // Explicit shutdown signal
                 _ = shutdown_rx.changed() => {
-                    if *shutdown_rx.borrow() {
-                        info!("Shutdown signal received: closing sync engine...");
-                        let _ = write.close().await;
-                        return;
-                    }
+                    info!("Shutdown signal received: closing sync engine...");
+                    let _ = write.close().await;
+                    return;
                 }
 
                 // Local change notification or shutdown when sender drops
@@ -184,9 +182,7 @@ pub async fn sync_engine(
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(RECONNECT_DELAY_SECS)) => {}
             _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    return;
-                }
+                return;
             }
         }
     }

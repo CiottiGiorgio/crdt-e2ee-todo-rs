@@ -21,13 +21,13 @@ pub struct AppState {
     pub crypto: Arc<CryptoEngine>,
     pub sync_tx: tokio::sync::mpsc::UnboundedSender<()>,
     pub sync_status: Arc<std::sync::RwLock<models::SyncStatus>>,
-    pub sync_shutdown_tx: tokio::sync::watch::Sender<bool>,
+    pub sync_shutdown_tx: tokio::sync::watch::Sender<()>,
     pub sync_handle: Arc<tokio::sync::Mutex<Option<tauri::async_runtime::JoinHandle<()>>>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let _ = tracing_subscriber::fmt::try_init();
+    tracing_subscriber::fmt::init();
 
     let builder = commands::get_specta_builder();
 
@@ -51,7 +51,7 @@ pub fn run() {
             let window = window.clone();
             tauri::async_runtime::spawn(async move {
                 let state = window.state::<AppState>();
-                let _ = state.sync_shutdown_tx.send(true);
+                let _ = state.sync_shutdown_tx.send(());
                 if let Some(handle) = state.sync_handle.lock().await.take() {
                     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), handle).await;
                 }
@@ -102,7 +102,7 @@ pub fn run() {
             );
 
             let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
-            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(());
             let sync_status = Arc::new(std::sync::RwLock::new(models::SyncStatus::Connecting));
 
             let sync_handle = tauri::async_runtime::spawn(sync::sync_engine(

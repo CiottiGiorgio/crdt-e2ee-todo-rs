@@ -113,7 +113,6 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_read_sync_message_generation() {
         use std::sync::Arc;
-        use tokio::sync::RwLock;
 
         let mut doc = Automerge::new();
         doc.transact(|tx| {
@@ -123,7 +122,7 @@ mod tests {
         })
         .unwrap();
 
-        let doc = Arc::new(RwLock::new(doc));
+        let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
         // Spawn multiple concurrent reader tasks generating sync messages with read locks
         let mut handles = Vec::new();

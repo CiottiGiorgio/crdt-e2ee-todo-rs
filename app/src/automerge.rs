@@ -1,14 +1,14 @@
 use automerge::sync::{Message as SyncMessage, State as SyncState, SyncDoc};
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ObjType, ReadDoc, ScalarValue, Value};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::crypto::CryptoEngine;
 use crate::models::{TodoItem, TodoStatus};
 
 pub struct AutomergeTodoRepo {
-    pub doc: RwLock<AutoCommit>,
+    pub doc: std::sync::RwLock<AutoCommit>,
     crypto: Arc<CryptoEngine>,
 }
 
@@ -21,7 +21,7 @@ impl AutomergeTodoRepo {
         };
 
         Ok(Self {
-            doc: RwLock::new(doc),
+            doc: std::sync::RwLock::new(doc),
             crypto,
         })
     }

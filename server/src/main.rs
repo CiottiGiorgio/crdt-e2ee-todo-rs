@@ -3,7 +3,7 @@ use axum::{extract::ws::WebSocketUpgrade, extract::State, routing::get, Router};
 use sqlx::sqlite::SqlitePoolOptions;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::{watch, RwLock};
+use tokio::sync::watch;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, Instrument};
 
@@ -21,7 +21,7 @@ static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 #[derive(Clone)]
 struct AppState {
     storage: SqliteStorage,
-    doc: Arc<RwLock<Automerge>>,
+    doc: Arc<tokio::sync::RwLock<Automerge>>,
     sync_wake_up: watch::Sender<()>,
 }
 
@@ -56,7 +56,7 @@ async fn main() {
     let (tx, _rx) = watch::channel::<()>(());
     let state = AppState {
         storage,
-        doc: Arc::new(RwLock::new(doc)),
+        doc: Arc::new(tokio::sync::RwLock::new(doc)),
         sync_wake_up: tx,
     };
 
