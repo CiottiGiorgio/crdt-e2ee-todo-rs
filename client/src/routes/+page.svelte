@@ -93,8 +93,6 @@
         <span>Connecting...</span>
       {:else if syncStatus.status === "disconnected"}
         <span>Local</span>
-      {:else if syncStatus.status === "error"}
-        <span>Sync Error: {syncStatus.message}</span>
       {/if}
     </div>
   </div>
@@ -320,14 +318,6 @@
   }
   .sync-badge.disconnected .sync-dot {
     background-color: #5f6368;
-  }
-
-  .sync-badge.error {
-    background-color: #fce8e6;
-    color: #c5221f;
-  }
-  .sync-badge.error .sync-dot {
-    background-color: #c5221f;
   }
 
   h2 {

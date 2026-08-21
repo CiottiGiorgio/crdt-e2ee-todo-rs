@@ -1,14 +1,23 @@
-use futures_util::SinkExt;
-use tokio_tungstenite::tungstenite::protocol::Message;
+use crate::models::SyncStatus;
+use tauri::Emitter;
+use tokio::sync::RwLock;
+use tracing::error;
 
-/// Sends raw encoded sync bytes over the WebSocket sink as a binary frame.
-pub async fn send_sync_message<S>(write: &mut S, data: &[u8]) -> Result<(), String>
-where
-    S: SinkExt<Message> + Unpin,
-    S::Error: std::fmt::Display,
-{
-    write
-        .send(Message::Binary(data.to_vec().into()))
-        .await
-        .map_err(|e| e.to_string())
+/// Updates the shared sync status lock and emits a "sync-status" event to the UI.
+pub async fn update_sync_status(
+    status: &RwLock<SyncStatus>,
+    app_handle: &tauri::AppHandle,
+    new_status: SyncStatus,
+) {
+    *status.write().await = new_status;
+    if let Err(e) = app_handle.emit("sync-status", new_status) {
+        error!("Failed to emit sync-status event: {}", e);
+    }
+}
+
+/// Emits a "todos-updated" event to the UI when new changes are received and applied from the server.
+pub fn notify_todos_updated(app_handle: &tauri::AppHandle) {
+    if let Err(e) = app_handle.emit("todos-updated", ()) {
+        error!("Failed to emit todos-updated event: {}", e);
+    }
 }

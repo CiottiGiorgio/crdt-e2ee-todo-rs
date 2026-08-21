@@ -18,11 +18,10 @@ pub struct TodoItem {
     pub status: TodoStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(tag = "status", content = "message", rename_all = "camelCase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(tag = "status", rename_all = "camelCase")]
 pub enum SyncStatus {
     Connecting,
     Connected,
     Disconnected,
-    Error(String),
 }

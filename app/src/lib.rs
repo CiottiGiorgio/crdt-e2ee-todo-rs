@@ -109,18 +109,28 @@ pub fn run() {
             let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
             let (sync_engine_wake_up, sync_engine_wake_up_rx) = tokio::sync::watch::channel(());
-            let cancel_token = CancellationToken::new();
-            let finished_token = CancellationToken::new();
+            let sync_engine_cancel_token = CancellationToken::new();
+            let sync_engine_finished_token = CancellationToken::new();
             let sync_engine_status =
                 Arc::new(tokio::sync::RwLock::new(models::SyncStatus::Connecting));
 
-            let fin_token = finished_token.clone();
-            let c_token = cancel_token.clone();
+            let fin_token = sync_engine_finished_token.clone();
+            let c_token = sync_engine_cancel_token.clone();
             let doc_clone = doc.clone();
             let storage_clone = storage.clone();
+            let sync_engine_status_clone = sync_engine_status.clone();
+            let app_handle = app.handle().clone();
 
             tauri::async_runtime::spawn(async move {
-                sync::sync_engine(doc_clone, storage_clone, sync_engine_wake_up_rx, c_token).await;
+                sync::sync_engine(
+                    doc_clone,
+                    app_handle,
+                    storage_clone,
+                    sync_engine_wake_up_rx,
+                    sync_engine_status_clone,
+                    c_token,
+                )
+                .await;
                 fin_token.cancel();
             });
 
@@ -129,8 +139,8 @@ pub fn run() {
                 storage,
                 crypto,
                 sync_engine_wake_up,
-                sync_engine_cancel_token: cancel_token,
-                sync_engine_finished_token: finished_token,
+                sync_engine_cancel_token,
+                sync_engine_finished_token,
                 sync_engine_status,
             });
 

@@ -12,7 +12,7 @@ export const commands = {
 };
 
 /* Types */
-export type SyncStatus = { status: "connecting" } | { status: "connected" } | { status: "disconnected" } | { status: "error"; message: string };
+export type SyncStatus = { status: "connecting" } | { status: "connected" } | { status: "disconnected" };
 
 export type TodoItem = {
 	id: string,

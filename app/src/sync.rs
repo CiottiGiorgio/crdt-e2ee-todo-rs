@@ -1,5 +1,7 @@
 mod constants;
+mod helper;
 
+use crate::models::SyncStatus;
 use crate::storage::SqliteStorage;
 use automerge::sync::{Message as SyncMessage, State as AutomergeServerState, SyncDoc};
 use automerge::AutoCommit;
@@ -7,6 +9,7 @@ use constants::{
     EXP_BACKOFF_FACTOR, EXP_BACKOFF_INITIAL_DURATION, EXP_BACKOFF_MAX_DURATION, WS_URL,
 };
 use futures_util::{SinkExt, StreamExt};
+use helper::{notify_todos_updated, update_sync_status};
 use std::cmp::min;
 use std::sync::Arc;
 use thiserror::Error;
@@ -45,13 +48,13 @@ enum SyncLoopError {
 }
 
 // TODO: We are missing:
-//  - A way for the sync engine to fire an event to the UI when it syncs with the server.
 //  - A decision on whether a SQLite error is fatal.
-//  - A way to signal the sync engine current status to the UI.
 pub async fn sync_engine(
     doc: Arc<tokio::sync::RwLock<AutoCommit>>,
+    app_handle: tauri::AppHandle,
     storage: Arc<SqliteStorage>,
     wake_up: tokio::sync::watch::Receiver<()>,
+    status: Arc<tokio::sync::RwLock<SyncStatus>>,
     cancellation_token: CancellationToken,
 ) {
     let mut wait_duration = EXP_BACKOFF_INITIAL_DURATION;
@@ -60,13 +63,16 @@ pub async fn sync_engine(
     //  However, after waiting, if we can acquire a websocket again the backoff duration resets.
     //  This is not ideal. We'd also like to keep persisting changes if we can't connect to the server.
     loop {
+        update_sync_status(&status, &app_handle, SyncStatus::Connecting).await;
         info!("Attempting to connect to sync server at {}", WS_URL);
 
         if let Ok((ws_stream, _)) = connect_async(WS_URL).await {
             info!("Connected to sync server");
+            update_sync_status(&status, &app_handle, SyncStatus::Connected).await;
             wait_duration = EXP_BACKOFF_INITIAL_DURATION;
             if let Err(err) = sync_loop(
                 doc.clone(),
+                app_handle.clone(),
                 ws_stream,
                 storage.clone(),
                 wake_up.clone(),
@@ -76,16 +82,25 @@ pub async fn sync_engine(
             {
                 warn!("Sync loop ended with error: {}", err);
             } else {
+                update_sync_status(&status, &app_handle, SyncStatus::Disconnected).await;
                 break;
             }
         }
-        sleep(wait_duration).await;
-        wait_duration = min(wait_duration * EXP_BACKOFF_FACTOR, EXP_BACKOFF_MAX_DURATION);
+        update_sync_status(&status, &app_handle, SyncStatus::Disconnected).await;
+        tokio::select! {
+            _ = sleep(wait_duration) => {
+                wait_duration = min(wait_duration * EXP_BACKOFF_FACTOR, EXP_BACKOFF_MAX_DURATION);
+            }
+            _ = cancellation_token.cancelled() => {
+                break;
+            }
+        }
     }
 }
 
 async fn sync_loop(
     doc: Arc<tokio::sync::RwLock<AutoCommit>>,
+    app_handle: tauri::AppHandle,
     connection: WebSocketStream<MaybeTlsStream<TcpStream>>,
     storage: Arc<SqliteStorage>,
     mut wake_up: tokio::sync::watch::Receiver<()>,
@@ -145,6 +160,7 @@ async fn sync_loop(
                     if let Some(bytes_to_save) = bytes_to_save {
                         storage.save(&bytes_to_save).await?;
                         debug!("Document was persisted to the database");
+                        notify_todos_updated(&app_handle);
                     }
                     Ok::<(), sqlx::Error>(())
                 };

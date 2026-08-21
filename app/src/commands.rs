@@ -7,7 +7,7 @@ use tauri_specta::{collect_commands, Builder};
 #[tauri::command]
 #[specta::specta]
 pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
-    Ok(state.sync_engine_status.read().await.clone())
+    Ok(*state.sync_engine_status.read().await)
 }
 
 #[tauri::command]
