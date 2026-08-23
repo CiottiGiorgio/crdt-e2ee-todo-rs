@@ -152,24 +152,23 @@ async fn sync_loop(
                     (bytes_to_save, response_msg)
                 };
 
-                let save_fut = async {
-                    if let Some(bytes_to_save) = bytes_to_save {
-                        storage.save(&bytes_to_save).await?;
-                        debug!("Document was persisted to the database");
-                        notify_todos_updated(&app_handle);
+                let (save_res, send_res) = tokio::join!(
+                    async {
+                        if let Some(bytes_to_save) = bytes_to_save {
+                            storage.save(&bytes_to_save).await?;
+                            debug!("Document was persisted to the database");
+                            notify_todos_updated(&app_handle);
+                        }
+                        Ok(())
+                    },
+                    async {
+                        if let Some(response_msg) = response_msg {
+                            tx.send(response_msg.encode().into()).await?;
+                            info!("Sent a sync response");
+                        }
+                        Ok(())
                     }
-                    Ok::<(), sqlx::Error>(())
-                };
-
-                let send_fut = async {
-                    if let Some(response_msg) = response_msg {
-                        tx.send(response_msg.encode().into()).await?;
-                        info!("Sent a sync response");
-                    }
-                    Ok::<(), tungstenite::Error>(())
-                };
-
-                let (save_res, send_res) = tokio::join!(save_fut, send_fut);
+                );
 
                 match (save_res, send_res) {
                     (Ok(()), Ok(())) => {}
