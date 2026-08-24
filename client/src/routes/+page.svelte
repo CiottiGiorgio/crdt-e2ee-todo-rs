@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { commands, type SyncStatus, type TodoItem, type TodoStatus } from "$lib/bindings";
   import { listen } from "@tauri-apps/api/event";
+  import { type as osType } from "@tauri-apps/plugin-os";
 
   let syncStatus = $state<SyncStatus>({ status: "connecting" });
   let todos = $state<TodoItem[]>([]);
@@ -22,6 +23,13 @@
     }
   }
 
+  async function handleReconnect() {
+    const res = await commands.manualReconnect();
+    if (res.status !== "ok") {
+      console.error("Failed to trigger reconnect:", res.error);
+    }
+  }
+
   onMount(() => {
     loadTodos();
     loadSyncStatus();
@@ -31,9 +39,37 @@
     const unlistenSync = listen<SyncStatus>("sync-status", (event) => {
       syncStatus = event.payload;
     });
+
+    const handleAutoReconnect = () => {
+      if (syncStatus.status === "disconnected") {
+        handleReconnect();
+      }
+    };
+    window.addEventListener("online", handleAutoReconnect);
+
+    let removeVisibilityListener: (() => void) | undefined;
+    const currentOs = osType();
+    const isMobile = currentOs === "android" || currentOs === "ios";
+    // On desktop, window switching is frequent so we avoid auto-reconnecting on focus.
+    // On mobile, visibilitychange reliably detects foreground resume. Since visibilitychange
+    // fires in both directions (hidden & visible), we check visibilityState to only reconnect on focus-in.
+    if (isMobile) {
+      const handleVisibility = () => {
+        if (document.visibilityState === "visible") {
+          handleAutoReconnect();
+        }
+      };
+      document.addEventListener("visibilitychange", handleVisibility);
+      removeVisibilityListener = () => {
+        document.removeEventListener("visibilitychange", handleVisibility);
+      };
+    }
+
     return () => {
       unlistenTodos.then((u) => u());
       unlistenSync.then((u) => u());
+      window.removeEventListener("online", handleAutoReconnect);
+      removeVisibilityListener?.();
     };
   });
 
@@ -85,16 +121,26 @@
 <main class="container">
   <div class="header-row">
     <h1>Todo List</h1>
-    <div class="sync-badge {syncStatus.status}">
-      <span class="sync-dot"></span>
-      {#if syncStatus.status === "connected"}
-        <span>Synced</span>
-      {:else if syncStatus.status === "connecting"}
-        <span>Connecting...</span>
-      {:else if syncStatus.status === "disconnected"}
-        <span>Local</span>
-      {/if}
-    </div>
+    {#if syncStatus.status === "disconnected"}
+      <button
+        type="button"
+        class="sync-badge disconnected retry-btn"
+        onclick={handleReconnect}
+        title="Click to retry connection"
+      >
+        <span class="sync-dot"></span>
+        <span>Local · <strong>Retry ↻</strong></span>
+      </button>
+    {:else}
+      <div class="sync-badge {syncStatus.status}">
+        <span class="sync-dot"></span>
+        {#if syncStatus.status === "connected"}
+          <span>Synced</span>
+        {:else if syncStatus.status === "connecting"}
+          <span>Connecting...</span>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   <form onsubmit={addTodo} class="todo-form">
@@ -318,6 +364,23 @@
   }
   .sync-badge.disconnected .sync-dot {
     background-color: #5f6368;
+  }
+
+  .sync-badge.retry-btn {
+    cursor: pointer;
+    border: 1px solid #dadce0;
+    font-family: inherit;
+    transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+  }
+
+  .sync-badge.retry-btn:hover {
+    background-color: #e8eaed;
+    border-color: #bdc1c6;
+    transform: translateY(-1px);
+  }
+
+  .sync-badge.retry-btn:active {
+    transform: translateY(0);
   }
 
   h2 {

@@ -66,6 +66,7 @@ pub fn run() {
 
     app_builder
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_os::init())
         .setup(move |app| {
             #[cfg(debug_assertions)]
             let storage = tauri::async_runtime::block_on(storage::SqliteStorage::in_memory())

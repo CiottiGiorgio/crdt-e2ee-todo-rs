@@ -9,6 +9,7 @@ export const commands = {
 	addTodo: (text: string) => typedError<TodoItem, string>(__TAURI_INVOKE("add_todo", { text })),
 	updateTodoStatus: (id: string, status: TodoStatus) => typedError<null, string>(__TAURI_INVOKE("update_todo_status", { id, status })),
 	deleteTodo: (id: string) => typedError<null, string>(__TAURI_INVOKE("delete_todo", { id })),
+	manualReconnect: () => typedError<null, string>(__TAURI_INVOKE("manual_reconnect")),
 };
 
 /* Types */
