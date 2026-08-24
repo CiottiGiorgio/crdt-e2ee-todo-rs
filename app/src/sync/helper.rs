@@ -1,15 +1,15 @@
 use crate::models::SyncStatus;
 use tauri::Emitter;
-use tokio::sync::RwLock;
+use std::sync::Mutex;
 use tracing::error;
 
 /// Updates the shared sync status lock and emits a "sync-status" event to the UI.
-pub async fn update_sync_status(
-    status: &RwLock<SyncStatus>,
+pub fn update_sync_status(
+    status: &Mutex<SyncStatus>,
     app_handle: &tauri::AppHandle,
     new_status: SyncStatus,
 ) {
-    *status.write().await = new_status;
+    *status.lock().expect("sync status lock poisoned") = new_status;
     if let Err(e) = app_handle.emit("sync-status", new_status) {
         error!("Failed to emit sync-status event: {}", e);
     }

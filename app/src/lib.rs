@@ -24,7 +24,7 @@ pub struct AppState {
     sync_engine_wake_up: tokio::sync::watch::Sender<()>,
     sync_engine_cancel_token: CancellationToken,
     sync_engine_finished_token: CancellationToken,
-    sync_engine_status: Arc<tokio::sync::RwLock<models::SyncStatus>>,
+    sync_engine_status: Arc<std::sync::Mutex<models::SyncStatus>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -109,7 +109,7 @@ pub fn run() {
             let sync_engine_cancel_token = CancellationToken::new();
             let sync_engine_finished_token = CancellationToken::new();
             let sync_engine_status =
-                Arc::new(tokio::sync::RwLock::new(models::SyncStatus::Connecting));
+                Arc::new(std::sync::Mutex::new(models::SyncStatus::Connecting));
 
             let fin_token = sync_engine_finished_token.clone();
             let c_token = sync_engine_cancel_token.clone();

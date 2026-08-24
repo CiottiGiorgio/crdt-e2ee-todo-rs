@@ -12,7 +12,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use helper::{notify_todos_updated, update_sync_status};
 use std::cmp::min;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::time::sleep;
@@ -55,7 +55,7 @@ pub async fn sync_engine(
     app_handle: tauri::AppHandle,
     storage: Arc<SqliteStorage>,
     wake_up: tokio::sync::watch::Receiver<()>,
-    status: Arc<tokio::sync::RwLock<SyncStatus>>,
+    status: Arc<Mutex<SyncStatus>>,
     cancellation_token: CancellationToken,
 ) {
     let mut wait_duration = EXP_BACKOFF_INITIAL_DURATION;
@@ -64,12 +64,12 @@ pub async fn sync_engine(
     //  However, after waiting, if we can acquire a websocket again the backoff duration resets.
     //  This is not ideal. We'd also like to keep persisting changes if we can't connect to the server.
     loop {
-        update_sync_status(&status, &app_handle, SyncStatus::Connecting).await;
+        update_sync_status(&status, &app_handle, SyncStatus::Connecting);
         info!("Attempting to connect to sync server at {}", WS_URL);
 
         if let Ok((ws_stream, _)) = connect_async(WS_URL).await {
             info!("Connected to sync server");
-            update_sync_status(&status, &app_handle, SyncStatus::Connected).await;
+            update_sync_status(&status, &app_handle, SyncStatus::Connected);
             let (mut sender, mut receiver) = ws_stream.split();
             wait_duration = EXP_BACKOFF_INITIAL_DURATION;
             let loop_result = sync_loop(
@@ -88,13 +88,13 @@ pub async fn sync_engine(
 
             match loop_result {
                 Ok(()) => {
-                    update_sync_status(&status, &app_handle, SyncStatus::Disconnected).await;
+                    update_sync_status(&status, &app_handle, SyncStatus::Disconnected);
                     break;
                 }
                 Err(err) => error!("Sync loop ended with error: {}", err),
             }
         }
-        update_sync_status(&status, &app_handle, SyncStatus::Disconnected).await;
+        update_sync_status(&status, &app_handle, SyncStatus::Disconnected);
         tokio::select! {
             _ = sleep(wait_duration) => {
                 wait_duration = min(wait_duration * EXP_BACKOFF_FACTOR, EXP_BACKOFF_MAX_DURATION);
