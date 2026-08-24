@@ -8,6 +8,7 @@ use automerge::Automerge;
 use constants::{
     EXP_BACKOFF_FACTOR, EXP_BACKOFF_INITIAL_DURATION, EXP_BACKOFF_MAX_DURATION, WS_URL,
 };
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use helper::{notify_todos_updated, update_sync_status};
 use std::cmp::min;
@@ -69,21 +70,28 @@ pub async fn sync_engine(
         if let Ok((ws_stream, _)) = connect_async(WS_URL).await {
             info!("Connected to sync server");
             update_sync_status(&status, &app_handle, SyncStatus::Connected).await;
+            let (mut sender, mut receiver) = ws_stream.split();
             wait_duration = EXP_BACKOFF_INITIAL_DURATION;
-            if let Err(err) = sync_loop(
+            let loop_result = sync_loop(
                 doc.clone(),
                 app_handle.clone(),
-                ws_stream,
+                &mut sender,
+                &mut receiver,
                 storage.clone(),
                 wake_up.clone(),
                 cancellation_token.clone(),
             )
-            .await
-            {
-                error!("Sync loop ended with error: {}", err);
-            } else {
-                update_sync_status(&status, &app_handle, SyncStatus::Disconnected).await;
-                break;
+            .await;
+            // We want to close gracefully the websocket. The sync loop could've ended in a websocket error
+            //  which is why we make this a best-effort operation rather than a fallible one.
+            let _ = sender.close().await;
+
+            match loop_result {
+                Ok(()) => {
+                    update_sync_status(&status, &app_handle, SyncStatus::Disconnected).await;
+                    break;
+                }
+                Err(err) => error!("Sync loop ended with error: {}", err),
             }
         }
         update_sync_status(&status, &app_handle, SyncStatus::Disconnected).await;
@@ -101,12 +109,12 @@ pub async fn sync_engine(
 async fn sync_loop(
     doc: Arc<tokio::sync::RwLock<Automerge>>,
     app_handle: tauri::AppHandle,
-    connection: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    tx: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
+    rx: &mut SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     storage: Arc<SqliteStorage>,
     mut wake_up: tokio::sync::watch::Receiver<()>,
     cancellation: CancellationToken,
 ) -> Result<(), SyncLoopError> {
-    let (mut tx, mut rx) = connection.split();
     let mut server_state = AutomergeServerState::new();
 
     if let Some(sync_handshake) = doc.read().await.generate_sync_message(&mut server_state) {
@@ -198,6 +206,5 @@ async fn sync_loop(
         }
     }
 
-    let _ = tx.close().await;
     Ok(())
 }
