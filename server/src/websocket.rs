@@ -31,7 +31,7 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
     info!("Connected");
 
     let (mut sender, mut receiver) = socket.split();
-    let mut wake_up = state.sync_wake_up.subscribe();
+    let mut doc_changed = state.doc_changed_token.subscribe();
 
     let mut sync_state = SyncState::new();
     loop {
@@ -67,7 +67,7 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                     let bytes_to_save = if heads_pre_merge != heads_post_merge {
                         info!("Applied sync changes (heads: {:?} -> {:?})", heads_pre_merge, heads_post_merge);
                         let bytes = doc_guard.save();
-                        let _ = state.sync_wake_up.send(());
+                        let _ = state.doc_changed_token.send(());
 
                         Some(bytes)
                     } else {
@@ -108,8 +108,8 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
                 }
             }
 
-            wake_up_res = wake_up.changed() => {
-                wake_up_res?;
+            doc_changed_res = doc_changed.changed() => {
+                doc_changed_res?;
                 debug!("Woken up by changes in the document");
                 let sync_message = {
                     state.doc.read().await.generate_sync_message(&mut sync_state)

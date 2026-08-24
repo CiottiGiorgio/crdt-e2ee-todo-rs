@@ -22,7 +22,7 @@ static CLIENT_COUNTER: AtomicUsize = AtomicUsize::new(1);
 struct AppState {
     storage: SqliteStorage,
     doc: Arc<tokio::sync::RwLock<Automerge>>,
-    sync_wake_up: watch::Sender<()>,
+    doc_changed_token: watch::Sender<()>,
 }
 
 #[tokio::main]
@@ -57,7 +57,7 @@ async fn main() {
     let state = AppState {
         storage,
         doc: Arc::new(tokio::sync::RwLock::new(doc)),
-        sync_wake_up: tx,
+        doc_changed_token: tx,
     };
 
     let app = Router::new()

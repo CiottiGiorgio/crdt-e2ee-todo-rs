@@ -105,7 +105,7 @@ pub fn run() {
             };
             let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
-            let (sync_engine_wake_up, sync_engine_wake_up_rx) = tokio::sync::watch::channel(());
+            let (sync_engine_wake_up, doc_changed_token) = tokio::sync::watch::channel(());
             let sync_engine_cancel_token = CancellationToken::new();
             let sync_engine_finished_token = CancellationToken::new();
             let sync_engine_status =
@@ -123,7 +123,7 @@ pub fn run() {
                     doc_clone,
                     app_handle,
                     storage_clone,
-                    sync_engine_wake_up_rx,
+                    doc_changed_token,
                     sync_engine_status_clone,
                     c_token,
                 )

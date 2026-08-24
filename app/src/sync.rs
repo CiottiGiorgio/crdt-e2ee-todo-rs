@@ -55,9 +55,9 @@ enum SyncLoopError {
 
 pub async fn sync_engine(
     doc: Arc<tokio::sync::RwLock<Automerge>>,
+    doc_changed_token: tokio::sync::watch::Receiver<()>,
     app_handle: tauri::AppHandle,
     storage: Arc<SqliteStorage>,
-    wake_up: tokio::sync::watch::Receiver<()>,
     status: Arc<Mutex<SyncStatus>>,
     cancellation_token: CancellationToken,
 ) {
@@ -82,7 +82,7 @@ pub async fn sync_engine(
                 &mut sender,
                 &mut receiver,
                 storage.clone(),
-                wake_up.clone(),
+                doc_changed_token.clone(),
                 cancellation_token.clone(),
             )
             .await;
@@ -125,7 +125,7 @@ async fn sync_loop(
     tx: &mut WsSender,
     rx: &mut WsReceiver,
     storage: Arc<SqliteStorage>,
-    mut wake_up: tokio::sync::watch::Receiver<()>,
+    mut doc_changed_token: tokio::sync::watch::Receiver<()>,
     cancellation: CancellationToken,
 ) -> Result<(), SyncLoopError> {
     let mut server_state = AutomergeServerState::new();
@@ -138,8 +138,8 @@ async fn sync_loop(
         tokio::select! {
             msg = rx.next() => handle_incoming_message(msg, &doc, &mut server_state, &storage, &app_handle, tx).await?,
 
-            woken_up = wake_up.changed() => {
-                woken_up?;
+            doc_changed_res = doc_changed_token.changed() => {
+                doc_changed_res?;
                 if let Some(sync_msg) = doc.read().await.generate_sync_message(&mut server_state) {
                     tx.send(sync_msg.encode().into()).await?;
                 }
