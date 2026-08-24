@@ -6,11 +6,13 @@ use crate::storage::SqliteStorage;
 use automerge::sync::{Message as SyncMessage, State as AutomergeServerState, SyncDoc};
 use automerge::Automerge;
 use constants::{
-    EXP_BACKOFF_FACTOR, EXP_BACKOFF_INITIAL_DURATION, EXP_BACKOFF_MAX_DURATION, WS_URL,
+    EXP_BACKOFF_FACTOR, EXP_BACKOFF_INITIAL_DURATION, EXP_BACKOFF_MAX_DURATION,
+    EXP_BACKOFF_MAX_RETRIES, WS_URL,
 };
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use helper::{notify_todos_updated, update_sync_status};
+use rand::RngExt;
 use std::cmp::min;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -48,8 +50,6 @@ enum SyncLoopError {
     },
 }
 
-// TODO: We are missing:
-//  - A decision on whether a SQLite error is fatal.
 pub async fn sync_engine(
     doc: Arc<tokio::sync::RwLock<Automerge>>,
     app_handle: tauri::AppHandle,
@@ -58,20 +58,21 @@ pub async fn sync_engine(
     status: Arc<Mutex<SyncStatus>>,
     cancellation_token: CancellationToken,
 ) {
-    let mut wait_duration = EXP_BACKOFF_INITIAL_DURATION;
+    let mut retry_count: u32 = 0;
+
+    update_sync_status(&status, &app_handle, SyncStatus::Connecting);
 
     // FIXME: If the sync_loop crashed because of db issues, it also dropped the websocket.
     //  However, after waiting, if we can acquire a websocket again the backoff duration resets.
     //  This is not ideal. We'd also like to keep persisting changes if we can't connect to the server.
     loop {
-        update_sync_status(&status, &app_handle, SyncStatus::Connecting);
         info!("Attempting to connect to sync server at {}", WS_URL);
 
         if let Ok((ws_stream, _)) = connect_async(WS_URL).await {
             info!("Connected to sync server");
             update_sync_status(&status, &app_handle, SyncStatus::Connected);
             let (mut sender, mut receiver) = ws_stream.split();
-            wait_duration = EXP_BACKOFF_INITIAL_DURATION;
+            retry_count = 0;
             let loop_result = sync_loop(
                 doc.clone(),
                 app_handle.clone(),
@@ -87,23 +88,32 @@ pub async fn sync_engine(
             let _ = sender.close().await;
 
             match loop_result {
-                Ok(()) => {
-                    update_sync_status(&status, &app_handle, SyncStatus::Disconnected);
-                    break;
+                Ok(()) => break,
+                Err(err) => {
+                    error!("Sync loop ended with error: {}", err);
+                    update_sync_status(&status, &app_handle, SyncStatus::Connecting);
                 }
-                Err(err) => error!("Sync loop ended with error: {}", err),
             }
         }
-        update_sync_status(&status, &app_handle, SyncStatus::Disconnected);
+        let wait_duration = min(
+            EXP_BACKOFF_INITIAL_DURATION * EXP_BACKOFF_FACTOR.pow(retry_count),
+            EXP_BACKOFF_MAX_DURATION,
+        );
+        let jittered_duration = rand::rng().random_range((wait_duration / 2)..=wait_duration);
         tokio::select! {
-            _ = sleep(wait_duration) => {
-                wait_duration = min(wait_duration * EXP_BACKOFF_FACTOR, EXP_BACKOFF_MAX_DURATION);
-            }
-            _ = cancellation_token.cancelled() => {
-                break;
-            }
+            _ = sleep(jittered_duration) => retry_count += 1,
+            _ = cancellation_token.cancelled() => break,
+        }
+
+        if retry_count > EXP_BACKOFF_MAX_RETRIES {
+            warn!(
+                "Reached maximum retry attempts ({EXP_BACKOFF_MAX_RETRIES}). Stopping sync engine."
+            );
+            break;
         }
     }
+
+    update_sync_status(&status, &app_handle, SyncStatus::Disconnected);
 }
 
 async fn sync_loop(

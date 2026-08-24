@@ -1,6 +1,6 @@
 use crate::models::SyncStatus;
-use tauri::Emitter;
 use std::sync::Mutex;
+use tauri::Emitter;
 use tracing::error;
 
 /// Updates the shared sync status lock and emits a "sync-status" event to the UI.

@@ -7,7 +7,10 @@ use tauri_specta::{collect_commands, Builder};
 #[tauri::command]
 #[specta::specta]
 pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
-    Ok(*state.sync_engine_status.lock().map_err(|e| e.to_string())?)
+    Ok(*state
+        .sync_engine_status
+        .lock()
+        .expect("sync status' lock poisoned"))
 }
 
 #[tauri::command]
