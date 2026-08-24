@@ -23,6 +23,9 @@ use tokio_tungstenite::{connect_async, tungstenite, MaybeTlsStream, WebSocketStr
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+type WsSender = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+type WsReceiver = SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>;
+
 #[derive(Debug, Error)]
 enum SyncLoopError {
     #[error("Websocket transport error: {0}")]
@@ -119,8 +122,8 @@ pub async fn sync_engine(
 async fn sync_loop(
     doc: Arc<tokio::sync::RwLock<Automerge>>,
     app_handle: tauri::AppHandle,
-    tx: &mut SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>,
-    rx: &mut SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+    tx: &mut WsSender,
+    rx: &mut WsReceiver,
     storage: Arc<SqliteStorage>,
     mut wake_up: tokio::sync::watch::Receiver<()>,
     cancellation: CancellationToken,
@@ -133,78 +136,11 @@ async fn sync_loop(
 
     loop {
         tokio::select! {
-            msg = rx.next() => {
-                let msg = match msg {
-                    Some(msg) => msg,
-                    None => return Err(SyncLoopError::ServerClosedConnection),
-                };
-                let data = match msg? {
-                    Message::Binary(data) => data,
-                    Message::Close(_) => return Err(SyncLoopError::ServerClosedConnection),
-                    Message::Ping(_) | Message::Pong(_) => continue,
-                    other => {
-                        warn!("Received unexpected WebSocket message: {:?}", other);
-                        continue;
-                    }
-                };
-                let msg = SyncMessage::decode(&data)?;
-                debug!("Received a sync message");
-
-                let (bytes_to_save, response_msg) = {
-                    let mut doc_guard = doc.write().await;
-                    let heads_pre_merge = doc_guard.get_heads();
-                    doc_guard.receive_sync_message(&mut server_state, msg)?;
-                    let doc_guard = doc_guard.downgrade();
-                    let heads_post_merge = doc_guard.get_heads();
-
-                    let bytes_to_save = if heads_pre_merge != heads_post_merge {
-                        info!("Applied sync changes (heads: {:?} -> {:?}", heads_pre_merge, heads_post_merge);
-                        Some(doc_guard.save())
-                    } else {
-                        debug!("Processed sync message (heads unchanged)");
-                        None
-                    };
-
-                    let response_msg = doc_guard.generate_sync_message(&mut server_state);
-
-                    (bytes_to_save, response_msg)
-                };
-
-                let (save_res, send_res) = tokio::join!(
-                    async {
-                        if let Some(bytes_to_save) = bytes_to_save {
-                            storage.save(&bytes_to_save).await?;
-                            debug!("Document was persisted to the database");
-                            notify_todos_updated(&app_handle);
-                        }
-                        Ok(())
-                    },
-                    async {
-                        if let Some(response_msg) = response_msg {
-                            tx.send(response_msg.encode().into()).await?;
-                            info!("Sent a sync response");
-                        }
-                        Ok(())
-                    }
-                );
-
-                match (save_res, send_res) {
-                    (Ok(()), Ok(())) => {}
-                    (Err(db_err), Ok(())) => return Err(SyncLoopError::Database(db_err)),
-                    (Ok(()), Err(ws_err)) => return Err(SyncLoopError::WebSocket(ws_err)),
-                    (Err(db), Err(ws)) => {
-                        return Err(SyncLoopError::DatabaseAndWebSocket { db, ws });
-                    }
-                }
-            }
+            msg = rx.next() => handle_incoming_message(msg, &doc, &mut server_state, &storage, &app_handle, tx).await?,
 
             woken_up = wake_up.changed() => {
                 woken_up?;
-                if let Some(sync_msg) = doc
-                    .read()
-                    .await
-                    .generate_sync_message(&mut server_state)
-                {
+                if let Some(sync_msg) = doc.read().await.generate_sync_message(&mut server_state) {
                     tx.send(sync_msg.encode().into()).await?;
                 }
             }
@@ -217,4 +153,77 @@ async fn sync_loop(
     }
 
     Ok(())
+}
+
+async fn handle_incoming_message(
+    msg: Option<Result<Message, tungstenite::Error>>,
+    doc: &tokio::sync::RwLock<Automerge>,
+    server_state: &mut AutomergeServerState,
+    storage: &SqliteStorage,
+    app_handle: &tauri::AppHandle,
+    tx: &mut WsSender,
+) -> Result<(), SyncLoopError> {
+    let msg = match msg {
+        Some(msg) => msg,
+        None => return Err(SyncLoopError::ServerClosedConnection),
+    };
+    let data = match msg? {
+        Message::Binary(data) => data,
+        Message::Close(_) => return Err(SyncLoopError::ServerClosedConnection),
+        Message::Ping(_) | Message::Pong(_) => return Ok(()),
+        other => {
+            warn!("Received unexpected WebSocket message: {:?}", other);
+            return Ok(());
+        }
+    };
+    let msg = SyncMessage::decode(&data)?;
+    debug!("Received a sync message");
+
+    let (bytes_to_save, response_msg) = {
+        let mut doc_guard = doc.write().await;
+        let heads_pre_merge = doc_guard.get_heads();
+        doc_guard.receive_sync_message(server_state, msg)?;
+        let doc_guard = doc_guard.downgrade();
+        let heads_post_merge = doc_guard.get_heads();
+
+        let bytes_to_save = if heads_pre_merge != heads_post_merge {
+            info!(
+                "Applied sync changes (heads: {:?} -> {:?}",
+                heads_pre_merge, heads_post_merge
+            );
+            Some(doc_guard.save())
+        } else {
+            debug!("Processed sync message (heads unchanged)");
+            None
+        };
+
+        let response_msg = doc_guard.generate_sync_message(server_state);
+
+        (bytes_to_save, response_msg)
+    };
+
+    let (save_res, send_res) = tokio::join!(
+        async {
+            if let Some(bytes_to_save) = bytes_to_save {
+                storage.save(&bytes_to_save).await?;
+                debug!("Document was persisted to the database");
+                notify_todos_updated(app_handle);
+            }
+            Ok(())
+        },
+        async {
+            if let Some(response_msg) = response_msg {
+                tx.send(response_msg.encode().into()).await?;
+                info!("Sent a sync response");
+            }
+            Ok(())
+        }
+    );
+
+    match (save_res, send_res) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(db_err), Ok(())) => Err(SyncLoopError::Database(db_err)),
+        (Ok(()), Err(ws_err)) => Err(SyncLoopError::WebSocket(ws_err)),
+        (Err(db), Err(ws)) => Err(SyncLoopError::DatabaseAndWebSocket { db, ws }),
+    }
 }
