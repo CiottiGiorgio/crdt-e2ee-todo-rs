@@ -1,9 +1,9 @@
 use crate::AppState;
 use automerge::sync::{Message as SyncMessage, State as SyncState, SyncDoc};
 use axum::extract::ws::{Message, WebSocket};
+use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use thiserror::Error;
-use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Error)]
@@ -21,7 +21,7 @@ pub enum SocketHandlerError {
     WebSocket(#[from] axum::Error),
 
     #[error("Sync wake-up signal error: {0}")]
-    WakeUp(#[from] watch::error::RecvError),
+    WakeUp(#[from] tokio::sync::watch::error::RecvError),
 
     #[error("Database persistence ({db}) and WebSocket transport ({ws}) both failed")]
     DatabaseAndWebSocket { db: sqlx::Error, ws: axum::Error },
@@ -31,8 +31,24 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
     info!("Connected");
 
     let (mut sender, mut receiver) = socket.split();
-    let mut doc_changed = state.doc_changed_token.subscribe();
+    let doc_changed = state.doc_changed_token.subscribe();
 
+    let loop_result = sync_loop(&mut sender, &mut receiver, state, doc_changed).await;
+
+    let _ = sender.close().await;
+
+    loop_result?;
+    info!("Disconnected");
+
+    Ok(())
+}
+
+async fn sync_loop(
+    sender: &mut SplitSink<WebSocket, Message>,
+    receiver: &mut SplitStream<WebSocket>,
+    state: AppState,
+    mut doc_changed: tokio::sync::watch::Receiver<()>
+) -> Result<(), SocketHandlerError> {
     let mut sync_state = SyncState::new();
     loop {
         tokio::select! {
@@ -121,8 +137,6 @@ pub async fn handle_socket(socket: WebSocket, state: AppState) -> Result<(), Soc
             }
         }
     }
-
-    info!("Disconnected");
 
     Ok(())
 }
