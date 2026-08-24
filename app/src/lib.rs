@@ -21,7 +21,8 @@ pub struct AppState {
     doc: Arc<tokio::sync::RwLock<Automerge>>,
     storage: Arc<SqliteStorage>,
     crypto: Arc<CryptoEngine>,
-    sync_engine_wake_up: tokio::sync::watch::Sender<()>,
+    sync_engine_doc_changed_token: tokio::sync::watch::Sender<()>,
+    sync_engine_reconnect_token: tokio::sync::watch::Sender<()>,
     sync_engine_cancel_token: CancellationToken,
     sync_engine_finished_token: CancellationToken,
     sync_engine_status: Arc<std::sync::Mutex<models::SyncStatus>>,
@@ -105,7 +106,9 @@ pub fn run() {
             };
             let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
-            let (sync_engine_wake_up, doc_changed_token) = tokio::sync::watch::channel(());
+            let (sync_engine_doc_changed_token, doc_changed_token) =
+                tokio::sync::watch::channel(());
+            let (sync_engine_reconnect_token, reconnect_token) = tokio::sync::watch::channel(());
             let sync_engine_cancel_token = CancellationToken::new();
             let sync_engine_finished_token = CancellationToken::new();
             let sync_engine_status =
@@ -121,9 +124,10 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 sync::sync_engine(
                     doc_clone,
+                    doc_changed_token,
+                    reconnect_token,
                     app_handle,
                     storage_clone,
-                    doc_changed_token,
                     sync_engine_status_clone,
                     c_token,
                 )
@@ -135,7 +139,8 @@ pub fn run() {
                 doc,
                 storage,
                 crypto,
-                sync_engine_wake_up,
+                sync_engine_doc_changed_token,
+                sync_engine_reconnect_token,
                 sync_engine_cancel_token,
                 sync_engine_finished_token,
                 sync_engine_status,

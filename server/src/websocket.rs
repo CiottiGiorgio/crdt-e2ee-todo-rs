@@ -47,7 +47,7 @@ async fn sync_loop(
     sender: &mut SplitSink<WebSocket, Message>,
     receiver: &mut SplitStream<WebSocket>,
     state: AppState,
-    mut doc_changed: tokio::sync::watch::Receiver<()>
+    mut doc_changed: tokio::sync::watch::Receiver<()>,
 ) -> Result<(), SocketHandlerError> {
     let mut sync_state = SyncState::new();
     loop {

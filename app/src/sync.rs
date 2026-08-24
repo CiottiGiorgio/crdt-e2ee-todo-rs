@@ -56,67 +56,81 @@ enum SyncLoopError {
 pub async fn sync_engine(
     doc: Arc<tokio::sync::RwLock<Automerge>>,
     doc_changed_token: tokio::sync::watch::Receiver<()>,
+    mut reconnect_token: tokio::sync::watch::Receiver<()>,
     app_handle: tauri::AppHandle,
     storage: Arc<SqliteStorage>,
     status: Arc<Mutex<SyncStatus>>,
     cancellation_token: CancellationToken,
 ) {
-    let mut retry_count: u32 = 0;
-
-    update_sync_status(&status, &app_handle, SyncStatus::Connecting);
-
-    // FIXME: If the sync_loop crashed because of db issues, it also dropped the websocket.
-    //  However, after waiting, if we can acquire a websocket again the backoff duration resets.
-    //  This is not ideal. We'd also like to keep persisting changes if we can't connect to the server.
     loop {
-        info!("Attempting to connect to sync server at {}", WS_URL);
+        let mut retry_count: u32 = 0;
 
-        if let Ok((ws_stream, _)) = connect_async(WS_URL).await {
-            info!("Connected to sync server");
-            update_sync_status(&status, &app_handle, SyncStatus::Connected);
-            let (mut sender, mut receiver) = ws_stream.split();
-            retry_count = 0;
-            let loop_result = sync_loop(
-                doc.clone(),
-                app_handle.clone(),
-                &mut sender,
-                &mut receiver,
-                storage.clone(),
-                doc_changed_token.clone(),
-                cancellation_token.clone(),
-            )
-            .await;
-            // We want to close gracefully the websocket. The sync loop could've ended in a websocket error
-            //  which is why we make this a best-effort operation rather than a fallible one.
-            let _ = sender.close().await;
+        update_sync_status(&status, &app_handle, SyncStatus::Connecting);
 
-            match loop_result {
-                Ok(()) => break,
-                Err(err) => {
-                    error!("Sync loop ended with error: {}", err);
-                    update_sync_status(&status, &app_handle, SyncStatus::Connecting);
+        // FIXME: If the sync_loop crashed because of db issues, it also dropped the websocket.
+        //  However, after waiting, if we can acquire a websocket again the backoff duration resets.
+        //  This is not ideal. We'd also like to keep persisting changes if we can't connect to the server.
+        loop {
+            info!("Attempting to connect to sync server at {}", WS_URL);
+
+            if let Ok((ws_stream, _)) = connect_async(WS_URL).await {
+                info!("Connected to sync server");
+                update_sync_status(&status, &app_handle, SyncStatus::Connected);
+                let (mut sender, mut receiver) = ws_stream.split();
+                retry_count = 0;
+                let loop_result = sync_loop(
+                    doc.clone(),
+                    app_handle.clone(),
+                    &mut sender,
+                    &mut receiver,
+                    storage.clone(),
+                    doc_changed_token.clone(),
+                    cancellation_token.clone(),
+                )
+                .await;
+                // We want to close gracefully the websocket. The sync loop could've ended in a websocket error
+                //  which is why we make this a best-effort operation rather than a fallible one.
+                let _ = sender.close().await;
+
+                match loop_result {
+                    Ok(()) => break,
+                    Err(err) => {
+                        error!("Sync loop ended with error: {}", err);
+                        update_sync_status(&status, &app_handle, SyncStatus::Connecting);
+                    }
                 }
             }
-        }
-        let wait_duration = min(
-            EXP_BACKOFF_INITIAL_DURATION * EXP_BACKOFF_FACTOR.pow(retry_count),
-            EXP_BACKOFF_MAX_DURATION,
-        );
-        let jittered_duration = rand::rng().random_range((wait_duration / 2)..=wait_duration);
-        tokio::select! {
-            _ = sleep(jittered_duration) => retry_count += 1,
-            _ = cancellation_token.cancelled() => break,
-        }
+            let wait_duration = min(
+                EXP_BACKOFF_INITIAL_DURATION * EXP_BACKOFF_FACTOR.pow(retry_count),
+                EXP_BACKOFF_MAX_DURATION,
+            );
+            let jittered_duration = rand::rng().random_range((wait_duration / 2)..=wait_duration);
+            tokio::select! {
+                _ = sleep(jittered_duration) => retry_count += 1,
+                _ = cancellation_token.cancelled() => break,
+            }
 
-        if retry_count > EXP_BACKOFF_MAX_RETRIES {
-            warn!(
+            if retry_count > EXP_BACKOFF_MAX_RETRIES {
+                warn!(
                 "Reached maximum retry attempts ({EXP_BACKOFF_MAX_RETRIES}). Stopping sync engine."
             );
-            break;
+                break;
+            }
+        }
+
+        update_sync_status(&status, &app_handle, SyncStatus::Disconnected);
+
+        tokio::select! {
+            reconnect_res = reconnect_token.changed() => {
+                reconnect_res.expect("reconnect channel sender dropped before cancellation token was triggered");
+                debug!("Woken up for manual reconnection");
+            },
+            _ = cancellation_token.cancelled() => {
+                info!("Cancellation was requested");
+                break
+            },
         }
     }
-
-    update_sync_status(&status, &app_handle, SyncStatus::Disconnected);
 }
 
 async fn sync_loop(
