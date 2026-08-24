@@ -73,12 +73,12 @@
     };
   });
 
-  let isBacklogOpen = $state(false);
+  let isArchivedOpen = $state(false);
   let isCompletedOpen = $state(false);
 
-  let workingSetTodos = $derived(todos.filter((t) => t.status === "workingSet"));
-  let backlogTodos = $derived(todos.filter((t) => t.status === "backlog"));
-  let completedTodos = $derived(todos.filter((t) => t.status === "completed"));
+  let todoTasks = $derived(todos.filter((t) => t.status === "todo"));
+  let archivedTasks = $derived(todos.filter((t) => t.status === "archived"));
+  let completedTasks = $derived(todos.filter((t) => t.status === "completed"));
 
   let newTodoText = $state("");
 
@@ -152,20 +152,20 @@
     <button type="submit">Add</button>
   </form>
 
-  <!-- 1. Working Set (First List) -->
+  <!-- 1. Todo Tasks (First List) -->
   <section class="todo-section">
-    <h2>Working Set</h2>
-    {#if workingSetTodos.length === 0}
-      <p class="empty-msg">No tasks in working set.</p>
+    <h2>Todo</h2>
+    {#if todoTasks.length === 0}
+      <p class="empty-msg">No tasks to do.</p>
     {:else}
       <ul class="todo-list">
-        {#each workingSetTodos as todo (todo.id)}
+        {#each todoTasks as todo (todo.id)}
           <li class="todo-item">
             <label>
               <input
                 type="checkbox"
                 checked={todo.status === "completed"}
-                onchange={() => updateStatus(todo.id, todo.status === "completed" ? "workingSet" : "completed")}
+                onchange={() => updateStatus(todo.id, todo.status === "completed" ? "todo" : "completed")}
               />
               <span>{todo.text}</span>
             </label>
@@ -173,9 +173,9 @@
               <button
                 type="button"
                 class="action-btn"
-                onclick={() => updateStatus(todo.id, "backlog")}
+                onclick={() => updateStatus(todo.id, "archived")}
               >
-                - Remove
+                Archive
               </button>
               <button
                 type="button"
@@ -191,17 +191,17 @@
     {/if}
   </section>
 
-  <!-- 2. Inactive Tasks (Collapsible, default collapsed) -->
+  <!-- 2. Archived Tasks (Collapsible, default collapsed) -->
   <section class="todo-section">
     <button
       type="button"
       class="collapse-header"
-      onclick={() => (isBacklogOpen = !isBacklogOpen)}
+      onclick={() => (isArchivedOpen = !isArchivedOpen)}
     >
-      <span>Tasks ({backlogTodos.length})</span>
+      <span>Archived ({archivedTasks.length})</span>
       <svg
         class="arrow-icon"
-        class:open={isBacklogOpen}
+        class:open={isArchivedOpen}
         width="16"
         height="16"
         viewBox="0 0 24 24"
@@ -214,18 +214,18 @@
         <polyline points="6 9 12 15 18 9"></polyline>
       </svg>
     </button>
-    {#if isBacklogOpen}
-      {#if backlogTodos.length === 0}
-        <p class="empty-msg">No active tasks.</p>
+    {#if isArchivedOpen}
+      {#if archivedTasks.length === 0}
+        <p class="empty-msg">No archived tasks.</p>
       {:else}
         <ul class="todo-list">
-          {#each backlogTodos as todo (todo.id)}
+          {#each archivedTasks as todo (todo.id)}
             <li class="todo-item">
               <label>
                 <input
                   type="checkbox"
                   checked={todo.status === "completed"}
-                  onchange={() => updateStatus(todo.id, todo.status === "completed" ? "backlog" : "completed")}
+                  onchange={() => updateStatus(todo.id, todo.status === "completed" ? "archived" : "completed")}
                 />
                 <span>{todo.text}</span>
               </label>
@@ -233,9 +233,9 @@
                 <button
                   type="button"
                   class="action-btn"
-                  onclick={() => updateStatus(todo.id, "workingSet")}
+                  onclick={() => updateStatus(todo.id, "todo")}
                 >
-                  + Working Set
+                  Unarchive
                 </button>
                 <button
                   type="button"
@@ -259,7 +259,7 @@
       class="collapse-header"
       onclick={() => (isCompletedOpen = !isCompletedOpen)}
     >
-      <span>Completed Tasks ({completedTodos.length})</span>
+      <span>Completed ({completedTasks.length})</span>
       <svg
         class="arrow-icon"
         class:open={isCompletedOpen}
@@ -276,17 +276,17 @@
       </svg>
     </button>
     {#if isCompletedOpen}
-      {#if completedTodos.length === 0}
+      {#if completedTasks.length === 0}
         <p class="empty-msg">No completed tasks.</p>
       {:else}
         <ul class="todo-list">
-          {#each completedTodos as todo (todo.id)}
+          {#each completedTasks as todo (todo.id)}
             <li class="todo-item">
               <label>
                 <input
                   type="checkbox"
                   checked={todo.status === "completed"}
-                  onchange={() => updateStatus(todo.id, "workingSet")}
+                  onchange={() => updateStatus(todo.id, "todo")}
                 />
                 <span class="completed">{todo.text}</span>
               </label>

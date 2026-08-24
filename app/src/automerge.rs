@@ -20,19 +20,17 @@ impl DecryptedView {
 
     fn status_to_str(status: TodoStatus) -> &'static str {
         match status {
-            TodoStatus::WorkingSet => "workingSet",
-            TodoStatus::Backlog => "backlog",
+            TodoStatus::Todo => "todo",
+            TodoStatus::Archived => "archived",
             TodoStatus::Completed => "completed",
-            TodoStatus::Deleted => "deleted",
         }
     }
 
     fn str_to_status(s: &str) -> Option<TodoStatus> {
         match s {
-            "workingSet" => Some(TodoStatus::WorkingSet),
-            "backlog" => Some(TodoStatus::Backlog),
+            "todo" | "workingSet" => Some(TodoStatus::Todo),
+            "archived" | "backlog" => Some(TodoStatus::Archived),
             "completed" => Some(TodoStatus::Completed),
-            "deleted" => Some(TodoStatus::Deleted),
             _ => None,
         }
     }
@@ -108,9 +106,7 @@ impl DecryptedView {
                     };
 
                 if let Some(status) = Self::str_to_status(&status_str) {
-                    if status != TodoStatus::Deleted {
-                        items.push(TodoItem { id, text, status });
-                    }
+                    items.push(TodoItem { id, text, status });
                 }
             }
         }
@@ -137,7 +133,7 @@ impl DecryptedView {
             .insert_object(&todos_obj, len, ObjType::Map)
             .map_err(|e| e.to_string())?;
 
-        let status = TodoStatus::WorkingSet;
+        let status = TodoStatus::Todo;
         let enc_text = self.crypto.encrypt_value(text.as_bytes())?;
         let enc_status = self
             .crypto
@@ -196,7 +192,40 @@ impl DecryptedView {
     }
 
     pub async fn delete(&self, id: String) -> Result<(), String> {
-        self.update_status(id, TodoStatus::Deleted).await
+        let mut doc = self.doc.write().await;
+        let mut tx = doc.transaction();
+
+        let todos_obj = match tx
+            .get(automerge::ROOT, "todos")
+            .map_err(|e| e.to_string())?
+        {
+            Some((Value::Object(ObjType::List), obj_id)) => obj_id,
+            _ => return Err(format!("Todo item with id {} not found", id)),
+        };
+
+        let len = tx.length(&todos_obj);
+        let mut found_idx = None;
+
+        for idx in 0..len {
+            if let Some((Value::Object(ObjType::Map), item_obj)) =
+                tx.get(&todos_obj, idx).map_err(|e| e.to_string())?
+            {
+                let item_id = Self::get_plain_str_from_doc(&tx, &item_obj, "id")?;
+                if item_id.as_deref() == Some(&id) {
+                    found_idx = Some(idx);
+                    break;
+                }
+            }
+        }
+
+        if let Some(idx) = found_idx {
+            tx.delete(&todos_obj, idx)
+                .map_err(|e| e.to_string())?;
+            tx.commit();
+            Ok(())
+        } else {
+            Err(format!("Todo item with id {} not found", id))
+        }
     }
 }
 
@@ -240,7 +269,15 @@ mod tests {
     async fn test_update_status() {
         let view = create_test_view();
         let t1 = view.add("Task".to_string()).await.unwrap();
-        assert_eq!(t1.status, TodoStatus::WorkingSet);
+        assert_eq!(t1.status, TodoStatus::Todo);
+
+        view.update_status(t1.id.clone(), TodoStatus::Archived)
+            .await
+            .unwrap();
+
+        let items = view.get_all().await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].status, TodoStatus::Archived);
 
         view.update_status(t1.id.clone(), TodoStatus::Completed)
             .await

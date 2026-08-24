@@ -4,10 +4,9 @@ use specta::Type;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum TodoStatus {
-    WorkingSet,
-    Backlog,
+    Todo,
+    Archived,
     Completed,
-    Deleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]

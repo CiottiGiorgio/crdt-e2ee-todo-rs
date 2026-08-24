@@ -21,7 +21,7 @@ export type TodoItem = {
 	status: TodoStatus,
 };
 
-export type TodoStatus = "workingSet" | "backlog" | "completed" | "deleted";
+export type TodoStatus = "todo" | "archived" | "completed";
 
 /* Tauri Specta runtime */
 async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
