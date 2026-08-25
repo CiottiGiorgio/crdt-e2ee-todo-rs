@@ -8,7 +8,8 @@ use tauri_specta::{collect_commands, Builder};
 #[specta::specta]
 pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
     Ok(*state
-        .sync_engine_status
+        .sync_engine
+        .status
         .lock()
         .expect("sync status' lock poisoned"))
 }
@@ -31,7 +32,7 @@ pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoIt
         .save(&doc_bytes)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = state.sync_engine_doc_changed_token.send(());
+    let _ = state.sync_engine.doc_changed_token.send(());
     Ok(item)
 }
 
@@ -50,7 +51,7 @@ pub async fn update_todo_status(
         .save(&doc_bytes)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = state.sync_engine_doc_changed_token.send(());
+    let _ = state.sync_engine.doc_changed_token.send(());
     Ok(())
 }
 
@@ -65,7 +66,7 @@ pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), S
         .save(&doc_bytes)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = state.sync_engine_doc_changed_token.send(());
+    let _ = state.sync_engine.doc_changed_token.send(());
     Ok(())
 }
 
@@ -73,7 +74,8 @@ pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), S
 #[specta::specta]
 pub async fn manual_reconnect(state: State<'_, AppState>) -> Result<(), String> {
     state
-        .sync_engine_reconnect_token
+        .sync_engine
+        .reconnect_token
         .send(())
         .map_err(|err| err.to_string())
 }

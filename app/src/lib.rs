@@ -18,15 +18,19 @@ use tokio_util::sync::CancellationToken;
 #[cfg(not(debug_assertions))]
 use tracing::info;
 
+pub struct SyncEngineState {
+    pub doc_changed_token: watch::Sender<()>,
+    pub reconnect_token: watch::Sender<()>,
+    pub cancel_token: CancellationToken,
+    pub finished_token: CancellationToken,
+    pub status: Arc<Mutex<models::SyncStatus>>,
+}
+
 pub struct AppState {
     doc: Arc<tokio::sync::RwLock<Automerge>>,
     storage: Arc<SqliteStorage>,
     crypto: Arc<CryptoEngine>,
-    sync_engine_doc_changed_token: watch::Sender<()>,
-    sync_engine_reconnect_token: watch::Sender<()>,
-    sync_engine_cancel_token: CancellationToken,
-    sync_engine_finished_token: CancellationToken,
-    sync_engine_status: Arc<Mutex<models::SyncStatus>>,
+    sync_engine: SyncEngineState,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -55,9 +59,9 @@ pub fn run() {
             let window = window.clone();
             tauri::async_runtime::spawn(async move {
                 let state = window.state::<AppState>();
-                state.sync_engine_cancel_token.cancel();
+                state.sync_engine.cancel_token.cancel();
                 tokio::select! {
-                    _ = state.sync_engine_finished_token.cancelled() => {}
+                    _ = state.sync_engine.finished_token.cancelled() => {}
                     _ = tokio::time::sleep(TIMEOUT_GRACEFUL_SHUTDOWN_DURATION) => {}
                 }
                 let _ = window.destroy();
@@ -139,11 +143,13 @@ pub fn run() {
                 doc,
                 storage,
                 crypto,
-                sync_engine_doc_changed_token,
-                sync_engine_reconnect_token,
-                sync_engine_cancel_token,
-                sync_engine_finished_token,
-                sync_engine_status,
+                sync_engine: SyncEngineState {
+                    doc_changed_token: sync_engine_doc_changed_token,
+                    reconnect_token: sync_engine_reconnect_token,
+                    cancel_token: sync_engine_cancel_token,
+                    finished_token: sync_engine_finished_token,
+                    status: sync_engine_status,
+                },
             });
 
             Ok(())
