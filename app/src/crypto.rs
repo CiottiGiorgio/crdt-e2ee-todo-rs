@@ -49,6 +49,66 @@ impl CryptoEngine {
     }
 }
 
+pub static DEFAULT_CRYPTO: std::sync::LazyLock<CryptoEngine> = std::sync::LazyLock::new(|| {
+    let master_key = [42u8; KEY_SIZE];
+    CryptoEngine::new(&master_key)
+});
+
+pub mod encrypted_string {
+    use super::DEFAULT_CRYPTO;
+    use autosurgeon::bytes::ByteVec;
+    use autosurgeon::{Hydrate, HydrateError, Prop, ReadDoc, Reconciler};
+
+    pub fn hydrate<D: ReadDoc>(
+        doc: &D,
+        obj: &automerge::ObjId,
+        prop: Prop<'_>,
+    ) -> Result<String, HydrateError> {
+        let bytes = ByteVec::hydrate(doc, obj, prop)?;
+        let decrypted = DEFAULT_CRYPTO
+            .decrypt_value(&bytes)
+            .map_err(|e| HydrateError::unexpected("valid encrypted bytes", e))?;
+        String::from_utf8(decrypted)
+            .map_err(|e| HydrateError::unexpected("valid utf-8 string", e.to_string()))
+    }
+
+    pub fn reconcile<R: Reconciler>(val: &String, mut reconciler: R) -> Result<(), R::Error> {
+        let encrypted = DEFAULT_CRYPTO
+            .encrypt_value(val.as_bytes())
+            .expect("encryption failed");
+        reconciler.bytes(encrypted)
+    }
+}
+
+pub mod encrypted_status {
+    use super::DEFAULT_CRYPTO;
+    use crate::models::TodoStatus;
+    use autosurgeon::bytes::ByteVec;
+    use autosurgeon::{Hydrate, HydrateError, Prop, ReadDoc, Reconciler};
+
+    pub fn hydrate<D: ReadDoc>(
+        doc: &D,
+        obj: &automerge::ObjId,
+        prop: Prop<'_>,
+    ) -> Result<TodoStatus, HydrateError> {
+        let bytes = ByteVec::hydrate(doc, obj, prop)?;
+        let decrypted = DEFAULT_CRYPTO
+            .decrypt_value(&bytes)
+            .map_err(|e| HydrateError::unexpected("valid encrypted bytes", e))?;
+        let s = String::from_utf8(decrypted)
+            .map_err(|e| HydrateError::unexpected("valid utf-8 string", e.to_string()))?;
+        s.parse::<TodoStatus>()
+            .map_err(|e| HydrateError::unexpected("valid todo status", e.0))
+    }
+
+    pub fn reconcile<R: Reconciler>(val: &TodoStatus, mut reconciler: R) -> Result<(), R::Error> {
+        let encrypted = DEFAULT_CRYPTO
+            .encrypt_value(val.as_ref().as_bytes())
+            .expect("encryption failed");
+        reconciler.bytes(encrypted)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

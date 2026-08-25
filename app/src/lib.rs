@@ -1,4 +1,3 @@
-mod automerge;
 pub mod commands;
 mod constants;
 mod crypto;
@@ -7,8 +6,8 @@ pub mod storage;
 mod sync;
 
 use crate::constants::TIMEOUT_GRACEFUL_SHUTDOWN_DURATION;
-use ::automerge::Automerge;
-use crypto::CryptoEngine;
+use ::automerge::transaction::Transactable;
+use ::automerge::{Automerge, ObjType};
 use std::sync::{Arc, Mutex};
 use storage::SqliteStorage;
 use tauri::Manager;
@@ -29,7 +28,6 @@ pub struct SyncEngineState {
 pub struct AppState {
     doc: Arc<tokio::sync::RwLock<Automerge>>,
     storage: Arc<SqliteStorage>,
-    crypto: Arc<CryptoEngine>,
     sync_engine: SyncEngineState,
 }
 
@@ -96,10 +94,6 @@ pub fn run() {
 
             let storage = Arc::new(storage);
 
-            // Shared E2EE Symmetric Key (32 bytes)
-            let master_key = [42u8; constants::KEY_SIZE];
-            let crypto = Arc::new(CryptoEngine::new(&master_key));
-
             // Local at-rest storage holds the raw automerge document: plaintext
             // structure with per-value ciphertext. Whole-document encryption is no
             // longer applied since the sensitive values are already encrypted.
@@ -108,7 +102,14 @@ pub fn run() {
 
             let doc = match stored_data {
                 Some(data) => Automerge::load(&data).expect("failed to load doc"),
-                None => Automerge::new(),
+                None => {
+                    let mut doc = Automerge::new();
+                    let mut tx = doc.transaction();
+                    tx.put_object(::automerge::ROOT, "todos", ObjType::List)
+                        .expect("failed to initialize todos list in automerge doc");
+                    tx.commit();
+                    doc
+                }
             };
             let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
@@ -142,7 +143,6 @@ pub fn run() {
             app.manage(AppState {
                 doc,
                 storage,
-                crypto,
                 sync_engine: SyncEngineState {
                     doc_changed_token: sync_engine_doc_changed_token,
                     reconnect_token: sync_engine_reconnect_token,

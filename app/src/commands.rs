@@ -1,8 +1,9 @@
-use crate::automerge::DecryptedView;
-use crate::models::{SyncStatus, TodoItem, TodoStatus};
+use crate::models::{SyncStatus, TodoDoc, TodoItem, TodoStatus};
 use crate::AppState;
+use autosurgeon::{hydrate, reconcile};
 use tauri::State;
 use tauri_specta::{collect_commands, Builder};
+use uuid::Uuid;
 
 #[tauri::command]
 #[specta::specta]
@@ -17,16 +18,29 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, S
 #[tauri::command]
 #[specta::specta]
 pub async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, String> {
-    let view = DecryptedView::new(state.doc.clone(), state.crypto.clone());
-    view.get_all().await
+    let doc = state.doc.read().await;
+    let todo_doc: TodoDoc = hydrate(&*doc).map_err(|err| err.to_string())?;
+    Ok(todo_doc.todos)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoItem, String> {
-    let view = DecryptedView::new(state.doc.clone(), state.crypto.clone());
-    let item = view.add(text).await?;
-    let doc_bytes = view.get_doc_bytes().await;
+    let mut doc = state.doc.write().await;
+    let mut tx = doc.transaction();
+
+    let mut todo_doc: TodoDoc = hydrate(&tx).map_err(|e| e.to_string())?;
+    let item = TodoItem {
+        id: Uuid::new_v4().to_string(),
+        text,
+        status: TodoStatus::Todo,
+    };
+    todo_doc.todos.push(item.clone());
+
+    reconcile(&mut tx, &todo_doc).map_err(|e| e.to_string())?;
+    tx.commit();
+
+    let doc_bytes = doc.save();
     state
         .storage
         .save(&doc_bytes)
@@ -43,9 +57,21 @@ pub async fn update_todo_status(
     status: TodoStatus,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let view = DecryptedView::new(state.doc.clone(), state.crypto.clone());
-    view.update_status(id, status).await?;
-    let doc_bytes = view.get_doc_bytes().await;
+    let mut doc = state.doc.write().await;
+    let mut tx = doc.transaction();
+
+    let mut todo_doc: TodoDoc = hydrate(&tx).map_err(|e| e.to_string())?;
+    let item = todo_doc
+        .todos
+        .iter_mut()
+        .find(|item| item.id == id)
+        .ok_or_else(|| format!("Todo item with id {} not found", id))?;
+    item.status = status;
+
+    reconcile(&mut tx, &todo_doc).map_err(|e| e.to_string())?;
+    tx.commit();
+
+    let doc_bytes = doc.save();
     state
         .storage
         .save(&doc_bytes)
@@ -58,9 +84,21 @@ pub async fn update_todo_status(
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let view = DecryptedView::new(state.doc.clone(), state.crypto.clone());
-    view.delete(id).await?;
-    let doc_bytes = view.get_doc_bytes().await;
+    let mut doc = state.doc.write().await;
+    let mut tx = doc.transaction();
+
+    let mut todo_doc: TodoDoc = hydrate(&tx).map_err(|e| e.to_string())?;
+    let initial_len = todo_doc.todos.len();
+    todo_doc.todos.retain(|item| item.id != id);
+
+    if todo_doc.todos.len() == initial_len {
+        return Err(format!("Todo item with id {} not found", id));
+    }
+
+    reconcile(&mut tx, &todo_doc).map_err(|e| e.to_string())?;
+    tx.commit();
+
+    let doc_bytes = doc.save();
     state
         .storage
         .save(&doc_bytes)

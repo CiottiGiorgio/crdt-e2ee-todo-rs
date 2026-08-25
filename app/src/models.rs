@@ -52,12 +52,21 @@ impl TryFrom<&str> for TodoStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+use autosurgeon::{Hydrate, Reconcile};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type, Hydrate, Reconcile)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoItem {
     pub id: String,
+    #[autosurgeon(with = "crate::crypto::encrypted_string")]
     pub text: String,
+    #[autosurgeon(with = "crate::crypto::encrypted_status")]
     pub status: TodoStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hydrate, Reconcile)]
+pub struct TodoDoc {
+    pub todos: Vec<TodoItem>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -87,9 +96,6 @@ mod tests {
         assert_eq!("completed".parse::<TodoStatus>(), Ok(TodoStatus::Completed));
 
         assert!("invalid".parse::<TodoStatus>().is_err());
-        assert_eq!(
-            TodoStatus::try_from("todo"),
-            Ok(TodoStatus::Todo)
-        );
+        assert_eq!(TodoStatus::try_from("todo"), Ok(TodoStatus::Todo));
     }
 }
