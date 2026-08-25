@@ -1,7 +1,6 @@
 use automerge::transaction::Transactable;
 use automerge::{Automerge, ObjType, ReadDoc, ScalarValue, Value};
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::crypto::CryptoEngine;
@@ -9,12 +8,12 @@ use crate::models::{TodoItem, TodoStatus};
 
 #[derive(Clone)]
 pub struct DecryptedView {
-    pub doc: Arc<RwLock<Automerge>>,
+    pub doc: Arc<tokio::sync::RwLock<Automerge>>,
     pub crypto: Arc<CryptoEngine>,
 }
 
 impl DecryptedView {
-    pub fn new(doc: Arc<RwLock<Automerge>>, crypto: Arc<CryptoEngine>) -> Self {
+    pub fn new(doc: Arc<tokio::sync::RwLock<Automerge>>, crypto: Arc<CryptoEngine>) -> Self {
         Self { doc, crypto }
     }
 
@@ -219,8 +218,7 @@ impl DecryptedView {
         }
 
         if let Some(idx) = found_idx {
-            tx.delete(&todos_obj, idx)
-                .map_err(|e| e.to_string())?;
+            tx.delete(&todos_obj, idx).map_err(|e| e.to_string())?;
             tx.commit();
             Ok(())
         } else {
@@ -235,7 +233,7 @@ mod tests {
     use crate::constants::KEY_SIZE;
 
     fn create_test_view() -> DecryptedView {
-        let doc = Arc::new(RwLock::new(Automerge::new()));
+        let doc = Arc::new(tokio::sync::RwLock::new(Automerge::new()));
         let key = [42u8; KEY_SIZE];
         let crypto = Arc::new(CryptoEngine::new(&key));
         DecryptedView::new(doc, crypto)

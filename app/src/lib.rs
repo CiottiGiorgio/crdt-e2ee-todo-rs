@@ -9,9 +9,10 @@ mod sync;
 use crate::constants::TIMEOUT_GRACEFUL_SHUTDOWN_DURATION;
 use ::automerge::Automerge;
 use crypto::CryptoEngine;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use storage::SqliteStorage;
 use tauri::Manager;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(not(debug_assertions))]
@@ -21,11 +22,11 @@ pub struct AppState {
     doc: Arc<tokio::sync::RwLock<Automerge>>,
     storage: Arc<SqliteStorage>,
     crypto: Arc<CryptoEngine>,
-    sync_engine_doc_changed_token: tokio::sync::watch::Sender<()>,
-    sync_engine_reconnect_token: tokio::sync::watch::Sender<()>,
+    sync_engine_doc_changed_token: watch::Sender<()>,
+    sync_engine_reconnect_token: watch::Sender<()>,
     sync_engine_cancel_token: CancellationToken,
     sync_engine_finished_token: CancellationToken,
-    sync_engine_status: Arc<std::sync::Mutex<models::SyncStatus>>,
+    sync_engine_status: Arc<Mutex<models::SyncStatus>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -107,13 +108,11 @@ pub fn run() {
             };
             let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
-            let (sync_engine_doc_changed_token, doc_changed_token) =
-                tokio::sync::watch::channel(());
-            let (sync_engine_reconnect_token, reconnect_token) = tokio::sync::watch::channel(());
+            let (sync_engine_doc_changed_token, doc_changed_token) = watch::channel(());
+            let (sync_engine_reconnect_token, reconnect_token) = watch::channel(());
             let sync_engine_cancel_token = CancellationToken::new();
             let sync_engine_finished_token = CancellationToken::new();
-            let sync_engine_status =
-                Arc::new(std::sync::Mutex::new(models::SyncStatus::Connecting));
+            let sync_engine_status = Arc::new(Mutex::new(models::SyncStatus::Connecting));
 
             let fin_token = sync_engine_finished_token.clone();
             let c_token = sync_engine_cancel_token.clone();

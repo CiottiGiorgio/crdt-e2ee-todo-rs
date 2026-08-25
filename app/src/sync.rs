@@ -17,6 +17,7 @@ use std::cmp::min;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, tungstenite, MaybeTlsStream, WebSocketStream};
@@ -38,7 +39,7 @@ enum SyncLoopError {
     SyncMessageDecode(#[from] automerge::sync::ReadMessageError),
 
     #[error("Wake up signal error: {0}")]
-    WakeUp(#[from] tokio::sync::watch::error::RecvError),
+    WakeUp(#[from] watch::error::RecvError),
 
     #[error("Automerge sync error: {0}")]
     Automerge(#[from] automerge::AutomergeError),
@@ -55,8 +56,8 @@ enum SyncLoopError {
 
 pub async fn sync_engine(
     doc: Arc<tokio::sync::RwLock<Automerge>>,
-    doc_changed_token: tokio::sync::watch::Receiver<()>,
-    mut reconnect_token: tokio::sync::watch::Receiver<()>,
+    doc_changed_token: watch::Receiver<()>,
+    mut reconnect_token: watch::Receiver<()>,
     app_handle: tauri::AppHandle,
     storage: Arc<SqliteStorage>,
     status: Arc<Mutex<SyncStatus>>,
@@ -139,7 +140,7 @@ async fn sync_loop(
     tx: &mut WsSender,
     rx: &mut WsReceiver,
     storage: Arc<SqliteStorage>,
-    mut doc_changed_token: tokio::sync::watch::Receiver<()>,
+    mut doc_changed_token: watch::Receiver<()>,
     cancellation: CancellationToken,
 ) -> Result<(), SyncLoopError> {
     let mut server_state = AutomergeServerState::new();

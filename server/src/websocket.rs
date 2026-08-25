@@ -4,6 +4,7 @@ use axum::extract::ws::{Message, WebSocket};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use thiserror::Error;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 #[derive(Debug, Error)]
@@ -21,7 +22,7 @@ pub enum SocketHandlerError {
     WebSocket(#[from] axum::Error),
 
     #[error("Sync wake-up signal error: {0}")]
-    WakeUp(#[from] tokio::sync::watch::error::RecvError),
+    WakeUp(#[from] watch::error::RecvError),
 
     #[error("Database persistence ({db}) and WebSocket transport ({ws}) both failed")]
     DatabaseAndWebSocket { db: sqlx::Error, ws: axum::Error },
@@ -47,7 +48,7 @@ async fn sync_loop(
     sender: &mut SplitSink<WebSocket, Message>,
     receiver: &mut SplitStream<WebSocket>,
     state: AppState,
-    mut doc_changed: tokio::sync::watch::Receiver<()>,
+    mut doc_changed: watch::Receiver<()>,
 ) -> Result<(), SocketHandlerError> {
     let mut sync_state = SyncState::new();
     loop {
