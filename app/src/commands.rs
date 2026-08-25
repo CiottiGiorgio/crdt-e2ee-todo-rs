@@ -1,6 +1,6 @@
-use crate::models::{SyncStatus, TodoDoc, TodoItem, TodoStatus};
+use crate::models::{SyncStatus, TodoItem, TodoStatus};
 use crate::AppState;
-use autosurgeon::{hydrate, reconcile};
+use autosurgeon::reconcile;
 use tauri::State;
 use tauri_specta::{collect_commands, Builder};
 use uuid::Uuid;
@@ -18,9 +18,8 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, S
 #[tauri::command]
 #[specta::specta]
 pub async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, String> {
-    let doc = state.doc.read().await;
-    let todo_doc: TodoDoc = hydrate(&*doc).map_err(|err| err.to_string())?;
-    Ok(todo_doc.todos)
+    let todos = state.todos.read().await;
+    Ok(todos.todos.clone())
 }
 
 #[tauri::command]
@@ -28,16 +27,16 @@ pub async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, Stri
 pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoItem, String> {
     let mut doc = state.doc.write().await;
     let mut tx = doc.transaction();
+    let mut todos = state.todos.write().await;
 
-    let mut todo_doc: TodoDoc = hydrate(&tx).map_err(|e| e.to_string())?;
     let item = TodoItem {
         id: Uuid::new_v4().to_string(),
         text,
         status: TodoStatus::Todo,
     };
-    todo_doc.todos.push(item.clone());
+    todos.todos.push(item.clone());
 
-    reconcile(&mut tx, &todo_doc).map_err(|e| e.to_string())?;
+    reconcile(&mut tx, &*todos).map_err(|e| e.to_string())?;
     tx.commit();
 
     let doc_bytes = doc.save();
@@ -59,16 +58,16 @@ pub async fn update_todo_status(
 ) -> Result<(), String> {
     let mut doc = state.doc.write().await;
     let mut tx = doc.transaction();
+    let mut todos = state.todos.write().await;
 
-    let mut todo_doc: TodoDoc = hydrate(&tx).map_err(|e| e.to_string())?;
-    let item = todo_doc
+    let item = todos
         .todos
         .iter_mut()
         .find(|item| item.id == id)
         .ok_or_else(|| format!("Todo item with id {} not found", id))?;
     item.status = status;
 
-    reconcile(&mut tx, &todo_doc).map_err(|e| e.to_string())?;
+    reconcile(&mut tx, &*todos).map_err(|e| e.to_string())?;
     tx.commit();
 
     let doc_bytes = doc.save();
@@ -86,16 +85,16 @@ pub async fn update_todo_status(
 pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), String> {
     let mut doc = state.doc.write().await;
     let mut tx = doc.transaction();
+    let mut todos = state.todos.write().await;
 
-    let mut todo_doc: TodoDoc = hydrate(&tx).map_err(|e| e.to_string())?;
-    let initial_len = todo_doc.todos.len();
-    todo_doc.todos.retain(|item| item.id != id);
+    let initial_len = todos.todos.len();
+    todos.todos.retain(|item| item.id != id);
 
-    if todo_doc.todos.len() == initial_len {
+    if todos.todos.len() == initial_len {
         return Err(format!("Todo item with id {} not found", id));
     }
 
-    reconcile(&mut tx, &todo_doc).map_err(|e| e.to_string())?;
+    reconcile(&mut tx, &*todos).map_err(|e| e.to_string())?;
     tx.commit();
 
     let doc_bytes = doc.save();

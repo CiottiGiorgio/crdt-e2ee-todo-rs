@@ -1,10 +1,11 @@
 mod constants;
 mod helper;
 
-use crate::models::SyncStatus;
+use crate::models::{SyncStatus, TodoDoc};
 use crate::storage::SqliteStorage;
 use automerge::sync::{Message as SyncMessage, State as AutomergeServerState, SyncDoc};
 use automerge::Automerge;
+use autosurgeon::hydrate;
 use constants::{
     EXP_BACKOFF_FACTOR, EXP_BACKOFF_INITIAL_DURATION, EXP_BACKOFF_MAX_DURATION,
     EXP_BACKOFF_MAX_RETRIES, WS_URL,
@@ -56,6 +57,7 @@ enum SyncLoopError {
 
 pub async fn sync_engine(
     doc: Arc<tokio::sync::RwLock<Automerge>>,
+    todos: Arc<tokio::sync::RwLock<TodoDoc>>,
     doc_changed_token: watch::Receiver<()>,
     mut reconnect_token: watch::Receiver<()>,
     app_handle: tauri::AppHandle,
@@ -81,6 +83,7 @@ pub async fn sync_engine(
                 retry_count = 0;
                 let loop_result = sync_loop(
                     doc.clone(),
+                    todos.clone(),
                     app_handle.clone(),
                     &mut sender,
                     &mut receiver,
@@ -136,6 +139,7 @@ pub async fn sync_engine(
 
 async fn sync_loop(
     doc: Arc<tokio::sync::RwLock<Automerge>>,
+    todos: Arc<tokio::sync::RwLock<TodoDoc>>,
     app_handle: tauri::AppHandle,
     tx: &mut WsSender,
     rx: &mut WsReceiver,
@@ -151,7 +155,7 @@ async fn sync_loop(
 
     loop {
         tokio::select! {
-            msg = rx.next() => handle_incoming_message(msg, &doc, &mut server_state, &storage, &app_handle, tx).await?,
+            msg = rx.next() => handle_incoming_message(msg, &doc, &todos, &mut server_state, &storage, &app_handle, tx).await?,
 
             doc_changed_res = doc_changed_token.changed() => {
                 doc_changed_res?;
@@ -173,6 +177,7 @@ async fn sync_loop(
 async fn handle_incoming_message(
     msg: Option<Result<Message, tungstenite::Error>>,
     doc: &tokio::sync::RwLock<Automerge>,
+    todos: &tokio::sync::RwLock<TodoDoc>,
     server_state: &mut AutomergeServerState,
     storage: &SqliteStorage,
     app_handle: &tauri::AppHandle,
@@ -206,6 +211,9 @@ async fn handle_incoming_message(
                 "Applied sync changes (heads: {:?} -> {:?}",
                 heads_pre_merge, heads_post_merge
             );
+            if let Ok(hydrated) = hydrate::<_, TodoDoc>(&*doc_guard) {
+                *todos.write().await = hydrated;
+            }
             Some(doc_guard.save())
         } else {
             debug!("Processed sync message (heads unchanged)");

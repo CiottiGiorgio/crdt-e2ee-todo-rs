@@ -26,9 +26,10 @@ pub struct SyncEngineState {
 }
 
 pub struct AppState {
-    doc: Arc<tokio::sync::RwLock<Automerge>>,
-    storage: Arc<SqliteStorage>,
-    sync_engine: SyncEngineState,
+    pub doc: Arc<tokio::sync::RwLock<Automerge>>,
+    pub todos: Arc<tokio::sync::RwLock<models::TodoDoc>>,
+    pub storage: Arc<SqliteStorage>,
+    pub sync_engine: SyncEngineState,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -111,6 +112,9 @@ pub fn run() {
                     doc
                 }
             };
+            let initial_todos: models::TodoDoc = autosurgeon::hydrate(&doc)
+                .expect("failed to hydrate initial todos from doc");
+            let todos = Arc::new(tokio::sync::RwLock::new(initial_todos));
             let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
             let (sync_engine_doc_changed_token, doc_changed_token) = watch::channel(());
@@ -122,6 +126,7 @@ pub fn run() {
             let fin_token = sync_engine_finished_token.clone();
             let c_token = sync_engine_cancel_token.clone();
             let doc_clone = doc.clone();
+            let todos_clone = todos.clone();
             let storage_clone = storage.clone();
             let sync_engine_status_clone = sync_engine_status.clone();
             let app_handle = app.handle().clone();
@@ -129,6 +134,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 sync::sync_engine(
                     doc_clone,
+                    todos_clone,
                     doc_changed_token,
                     reconnect_token,
                     app_handle,
@@ -142,6 +148,7 @@ pub fn run() {
 
             app.manage(AppState {
                 doc,
+                todos,
                 storage,
                 sync_engine: SyncEngineState {
                     doc_changed_token: sync_engine_doc_changed_token,
