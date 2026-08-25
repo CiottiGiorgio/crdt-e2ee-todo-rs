@@ -17,23 +17,6 @@ impl DecryptedView {
         Self { doc, crypto }
     }
 
-    fn status_to_str(status: TodoStatus) -> &'static str {
-        match status {
-            TodoStatus::Todo => "todo",
-            TodoStatus::Archived => "archived",
-            TodoStatus::Completed => "completed",
-        }
-    }
-
-    fn str_to_status(s: &str) -> Option<TodoStatus> {
-        match s {
-            "todo" | "workingSet" => Some(TodoStatus::Todo),
-            "archived" | "backlog" => Some(TodoStatus::Archived),
-            "completed" => Some(TodoStatus::Completed),
-            _ => None,
-        }
-    }
-
     fn get_plain_str_from_doc<D: ReadDoc>(
         doc: &D,
         item_obj: &automerge::ObjId,
@@ -104,7 +87,7 @@ impl DecryptedView {
                         None => continue,
                     };
 
-                if let Some(status) = Self::str_to_status(&status_str) {
+                if let Ok(status) = status_str.parse::<TodoStatus>() {
                     items.push(TodoItem { id, text, status });
                 }
             }
@@ -136,7 +119,7 @@ impl DecryptedView {
         let enc_text = self.crypto.encrypt_value(text.as_bytes())?;
         let enc_status = self
             .crypto
-            .encrypt_value(Self::status_to_str(status).as_bytes())?;
+            .encrypt_value(status.as_ref().as_bytes())?;
 
         tx.put(&item_obj, "id", id.as_str())
             .map_err(|e| e.to_string())?;
@@ -173,7 +156,7 @@ impl DecryptedView {
                 if item_id.as_deref() == Some(&id) {
                     let enc_status = self
                         .crypto
-                        .encrypt_value(Self::status_to_str(status).as_bytes())?;
+                        .encrypt_value(status.as_ref().as_bytes())?;
                     tx.put(&item_obj, "status", ScalarValue::Bytes(enc_status))
                         .map_err(|e| e.to_string())?;
                     found = true;
