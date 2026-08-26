@@ -17,7 +17,7 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, S
 #[tauri::command]
 #[specta::specta]
 pub async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, String> {
-    Ok(state.doc_manager.apply(|todo| todo.todos.clone()).await)
+    Ok(state.doc_manager.apply(|doc| doc.get_todos()).await)
 }
 
 #[tauri::command]
@@ -32,8 +32,7 @@ pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoIt
     state
         .doc_manager
         .apply_mut(move |doc| {
-            let todos = &mut doc.todos;
-            todos.push(item_clone)
+            doc.add_todo(item_clone);
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -49,18 +48,9 @@ pub async fn update_todo_status(
 ) -> Result<(), String> {
     state
         .doc_manager
-        .apply_mut(move |doc| {
-            let todos = &mut doc.todos;
-            let item = todos
-                .iter_mut()
-                .find(|item| item.id == id)
-                .ok_or_else(|| format!("Todo item with id {} not found", id))?;
-            item.status = status;
-            Ok(())
-        })
+        .apply_mut(move |doc| doc.update_todo_status(&id, status))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e: String| e)
 }
 
 #[tauri::command]
@@ -68,19 +58,9 @@ pub async fn update_todo_status(
 pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), String> {
     state
         .doc_manager
-        .apply_mut(move |doc| {
-            let todos = &mut doc.todos;
-            let initial_len = todos.len();
-            todos.retain(|item| item.id != id);
-            if todos.len() == initial_len {
-                Err(format!("Todo item with id {} not found", id))
-            } else {
-                Ok(())
-            }
-        })
+        .apply_mut(move |doc| doc.delete_todo(&id))
         .await
         .map_err(|e| e.to_string())?
-        .map_err(|e: String| e)
 }
 
 #[tauri::command]
