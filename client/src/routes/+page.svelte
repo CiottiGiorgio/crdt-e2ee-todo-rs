@@ -74,7 +74,6 @@
   </form>
 
   <TodoSection
-    title="Todo"
     items={todoTasks}
     emptyMessage="No tasks to do."
     onStatusChange={updateStatus}

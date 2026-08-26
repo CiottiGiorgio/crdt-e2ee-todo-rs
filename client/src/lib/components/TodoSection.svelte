@@ -11,7 +11,7 @@
     onStatusChange,
     onDelete,
   }: {
-    title: string;
+    title?: string;
     items: TodoItemType[];
     emptyMessage?: string;
     collapsible?: boolean;
@@ -25,33 +25,35 @@
 </script>
 
 <section class="todo-section">
-  {#if collapsible}
-    <button
-      type="button"
-      class="collapse-header"
-      onclick={() => (isOpen = !isOpen)}
-    >
-      <span>{title} ({items.length})</span>
-      <svg
-        class="arrow-icon"
-        class:open={isOpen}
-        width="16"
-        height="16"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2.5"
-        stroke-linecap="round"
-        stroke-linejoin="round"
+  {#if title}
+    {#if collapsible}
+      <button
+        type="button"
+        class="collapse-header"
+        onclick={() => (isOpen = !isOpen)}
       >
-        <polyline points="6 9 12 15 18 9"></polyline>
-      </svg>
-    </button>
-  {:else}
-    <h2>{title}</h2>
+        <span>{title} ({items.length})</span>
+        <svg
+          class="arrow-icon"
+          class:open={isOpen}
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+    {:else}
+      <h2>{title}</h2>
+    {/if}
   {/if}
 
-  {#if !collapsible || isOpen}
+  {#if !collapsible || !title || isOpen}
     {#if items.length === 0}
       <p class="empty-msg">{emptyMessage}</p>
     {:else}
