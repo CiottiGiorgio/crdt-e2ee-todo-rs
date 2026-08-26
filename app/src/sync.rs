@@ -83,6 +83,13 @@ pub async fn sync_engine(
                     }
                 }
             }
+            if retry_count >= EXP_BACKOFF_MAX_RETRIES {
+                warn!(
+                    "Reached maximum retry attempts ({EXP_BACKOFF_MAX_RETRIES}). Stopping sync engine."
+                );
+                break;
+            }
+
             let wait_duration = min(
                 EXP_BACKOFF_INITIAL_DURATION * EXP_BACKOFF_FACTOR.pow(retry_count),
                 EXP_BACKOFF_MAX_DURATION,
@@ -91,13 +98,6 @@ pub async fn sync_engine(
             tokio::select! {
                 _ = sleep(jittered_duration) => retry_count += 1,
                 _ = cancellation_token.cancelled() => break,
-            }
-
-            if retry_count > EXP_BACKOFF_MAX_RETRIES {
-                warn!(
-                "Reached maximum retry attempts ({EXP_BACKOFF_MAX_RETRIES}). Stopping sync engine."
-            );
-                break;
             }
         }
 
