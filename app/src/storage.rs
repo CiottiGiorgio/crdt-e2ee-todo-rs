@@ -22,7 +22,9 @@ impl SqliteStorage {
 
     /// Creates an in-memory SQLite storage (useful for debug and tests).
     pub async fn in_memory() -> Result<Self, sqlx::Error> {
-        let pool = SqlitePoolOptions::new().connect("sqlite::memory:").await?;
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:?cache=shared")
+            .await?;
 
         Self::new(pool).await
     }
