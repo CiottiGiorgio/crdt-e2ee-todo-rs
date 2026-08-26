@@ -108,8 +108,8 @@ pub fn run() {
                     doc
                 }
             };
-            let initial_todos: models::TodoDoc = autosurgeon::hydrate(&doc)
-                .expect("failed to hydrate initial todos from doc");
+            let initial_todos: models::TodoDoc =
+                autosurgeon::hydrate(&doc).expect("failed to hydrate initial todos from doc");
 
             let (sync_engine_reconnect_token, reconnect_token) = watch::channel(());
             let sync_engine_cancel_token = CancellationToken::new();

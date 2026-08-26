@@ -6,7 +6,7 @@ use thiserror::Error;
 use tokio::sync::{watch, RwLock};
 use tracing::{debug, error, info};
 
-use crate::models::{TodoDoc, TodoItem};
+use crate::models::TodoDoc;
 use crate::storage::SqliteStorage;
 
 #[derive(Debug, Error)]
@@ -54,15 +54,16 @@ impl DocManager {
     /// Apply a local mutation to the todo list.
     /// Reconciles into the Automerge doc, persists (fire-and-forget),
     /// and signals the sync engine.
-    pub async fn apply<F, R>(&self, f: F) -> Result<R, DocError>
+    pub async fn apply_mut<F, R>(&self, f: F) -> Result<R, DocError>
     where
-        F: FnOnce(&mut Vec<TodoItem>) -> R,
+        F: FnOnce(&mut TodoDoc) -> R,
     {
         let (result, bytes) = {
             let mut inner = self.inner.write().await;
             let DocInner { doc, todos } = &mut *inner;
-            let result = f(&mut todos.todos);
+            let result = f(todos);
 
+            // FIXME: We reconcile and persist whether f is Ok or Err.
             let mut tx = doc.transaction();
             reconcile(&mut tx, &*todos)?;
             tx.commit();
@@ -73,6 +74,16 @@ impl DocManager {
         self.persist(&bytes).await;
         let _ = self.doc_changed.send(());
         Ok(result)
+    }
+
+    pub async fn apply<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&TodoDoc) -> R,
+    {
+        let inner = self.inner.read().await;
+        let DocInner { doc: _, todos } = &*inner;
+
+        f(todos)
     }
 
     /// Merge an incoming sync message from the server.
@@ -127,11 +138,6 @@ impl DocManager {
             .await
             .doc
             .generate_sync_message(server_state)
-    }
-
-    /// Read-only snapshot of the current todos.
-    pub async fn todos(&self) -> Vec<TodoItem> {
-        self.inner.read().await.todos.todos.clone()
     }
 
     /// Serialize the doc and save to SQLite. On failure, log and

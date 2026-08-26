@@ -17,7 +17,7 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, S
 #[tauri::command]
 #[specta::specta]
 pub async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, String> {
-    Ok(state.doc_manager.todos().await)
+    Ok(state.doc_manager.apply(|todo| todo.todos.clone()).await)
 }
 
 #[tauri::command]
@@ -31,7 +31,10 @@ pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoIt
     let item_clone = item.clone();
     state
         .doc_manager
-        .apply(move |todos| todos.push(item_clone))
+        .apply_mut(move |doc| {
+            let todos = &mut doc.todos;
+            todos.push(item_clone)
+        })
         .await
         .map_err(|e| e.to_string())?;
     Ok(item)
@@ -46,7 +49,8 @@ pub async fn update_todo_status(
 ) -> Result<(), String> {
     state
         .doc_manager
-        .apply(move |todos| {
+        .apply_mut(move |doc| {
+            let todos = &mut doc.todos;
             let item = todos
                 .iter_mut()
                 .find(|item| item.id == id)
@@ -64,7 +68,8 @@ pub async fn update_todo_status(
 pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), String> {
     state
         .doc_manager
-        .apply(move |todos| {
+        .apply_mut(move |doc| {
+            let todos = &mut doc.todos;
             let initial_len = todos.len();
             todos.retain(|item| item.id != id);
             if todos.len() == initial_len {
