@@ -8,8 +8,12 @@ pub struct TodoDoc {
 }
 
 impl TodoDoc {
-    pub fn get_todos(&self) -> Vec<TodoItem> {
-        self.todos.clone()
+    pub fn get_todos_by_status(&self, status: TodoStatus) -> Vec<TodoItem> {
+        self.todos
+            .iter()
+            .filter(|item| item.status == status)
+            .cloned()
+            .collect()
     }
 
     pub fn add_todo(&mut self, item: TodoItem) {
@@ -44,7 +48,7 @@ mod tests {
     #[test]
     fn test_todo_doc_operations() {
         let mut doc = TodoDoc::default();
-        assert!(doc.get_todos().is_empty());
+        assert!(doc.todos.is_empty());
 
         let item1 = TodoItem {
             id: "1".to_string(),
@@ -59,16 +63,21 @@ mod tests {
 
         doc.add_todo(item1.clone());
         doc.add_todo(item2.clone());
-        assert_eq!(doc.get_todos(), vec![item1.clone(), item2.clone()]);
+        assert_eq!(doc.get_todos_by_status(TodoStatus::Todo), vec![item1.clone(), item2.clone()]);
 
         assert!(doc.update_todo_status("1", TodoStatus::Completed).is_ok());
-        assert_eq!(doc.get_todos()[0].status, TodoStatus::Completed);
+        assert_eq!(doc.get_todos_by_status(TodoStatus::Completed), vec![TodoItem {
+            id: "1".to_string(),
+            text: "Task 1".to_string(),
+            status: TodoStatus::Completed,
+        }]);
+        assert_eq!(doc.get_todos_by_status(TodoStatus::Todo), vec![item2.clone()]);
         assert!(doc
             .update_todo_status("non-existent", TodoStatus::Archived)
             .is_err());
 
         assert!(doc.delete_todo("1").is_ok());
-        assert_eq!(doc.get_todos(), vec![item2]);
+        assert_eq!(doc.todos, vec![item2]);
         assert!(doc.delete_todo("1").is_err());
     }
 }

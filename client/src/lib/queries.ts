@@ -4,16 +4,21 @@ import { toast } from "svelte-sonner";
 
 export const todoKeys = {
   all: ["todos"] as const,
+  byStatus: (status: TodoStatus) => [...todoKeys.all, status] as const,
 };
 
-export function useTodos() {
+export function useTodosByStatus(
+  status: TodoStatus,
+  enabled: () => boolean = () => true
+) {
   return createQuery(() => ({
-    queryKey: todoKeys.all,
+    queryKey: todoKeys.byStatus(status),
     queryFn: async () => {
-      const res = await commands.getTodos();
+      const res = await commands.getTodosByStatus(status);
       if (res.status === "error") throw new Error(res.error);
       return res.data;
     },
+    enabled: enabled(),
   }));
 }
 

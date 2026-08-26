@@ -16,8 +16,14 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, S
 
 #[tauri::command]
 #[specta::specta]
-pub async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, String> {
-    Ok(state.doc_manager.apply(|doc| doc.get_todos()).await)
+pub async fn get_todos_by_status(
+    status: TodoStatus,
+    state: State<'_, AppState>,
+) -> Result<Vec<TodoItem>, String> {
+    Ok(state
+        .doc_manager
+        .apply(|doc| doc.get_todos_by_status(status))
+        .await)
 }
 
 #[tauri::command]
@@ -76,7 +82,7 @@ pub async fn manual_reconnect(state: State<'_, AppState>) -> Result<(), String> 
 pub fn get_specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new().commands(collect_commands![
         get_sync_status,
-        get_todos,
+        get_todos_by_status,
         add_todo,
         update_todo_status,
         delete_todo,

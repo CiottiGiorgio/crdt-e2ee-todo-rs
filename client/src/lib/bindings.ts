@@ -5,7 +5,7 @@ import { invoke as __TAURI_INVOKE } from "@tauri-apps/api/core";
 /** Commands */
 export const commands = {
 	getSyncStatus: () => typedError<SyncStatus, string>(__TAURI_INVOKE("get_sync_status")),
-	getTodos: () => typedError<TodoItem[], string>(__TAURI_INVOKE("get_todos")),
+	getTodosByStatus: (status: TodoStatus) => typedError<TodoItem[], string>(__TAURI_INVOKE("get_todos_by_status", { status })),
 	addTodo: (text: string) => typedError<TodoItem, string>(__TAURI_INVOKE("add_todo", { text })),
 	updateTodoStatus: (id: string, status: TodoStatus) => typedError<null, string>(__TAURI_INVOKE("update_todo_status", { id, status })),
 	deleteTodo: (id: string) => typedError<null, string>(__TAURI_INVOKE("delete_todo", { id })),

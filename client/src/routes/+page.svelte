@@ -4,7 +4,7 @@
   import { toast } from "svelte-sonner";
   import { useQueryClient } from "@tanstack/svelte-query";
   import {
-    useTodos,
+    useTodosByStatus,
     useAddTodo,
     useUpdateTodoStatus,
     useDeleteTodo,
@@ -16,7 +16,13 @@
 
   const queryClient = useQueryClient();
 
-  const todosQuery = useTodos();
+  let isArchivedOpen = $state(false);
+  let isCompletedOpen = $state(false);
+
+  const todoTasksQuery = useTodosByStatus("todo");
+  const archivedTasksQuery = useTodosByStatus("archived", () => isArchivedOpen);
+  const completedTasksQuery = useTodosByStatus("completed", () => isCompletedOpen);
+
   const addTodoMutation = useAddTodo();
   const updateStatusMutation = useUpdateTodoStatus();
   const deleteTodoMutation = useDeleteTodo();
@@ -35,10 +41,9 @@
     };
   });
 
-  let todos = $derived(todosQuery.data ?? []);
-  let todoTasks = $derived(todos.filter((t) => t.status === "todo"));
-  let archivedTasks = $derived(todos.filter((t) => t.status === "archived"));
-  let completedTasks = $derived(todos.filter((t) => t.status === "completed"));
+  let todoTasks = $derived(todoTasksQuery.data ?? []);
+  let archivedTasks = $derived(archivedTasksQuery.data ?? []);
+  let completedTasks = $derived(completedTasksQuery.data ?? []);
 
   let newTodoText = $state("");
 
@@ -47,6 +52,7 @@
     const text = newTodoText.trim();
     if (!text) return;
     addTodoMutation.mutate(text);
+    newTodoText = "";
   }
 
   function updateStatus(id: string, newStatus: TodoStatus) {
@@ -84,7 +90,7 @@
     title="Archived"
     items={archivedTasks}
     collapsible
-    defaultOpen={false}
+    bind:isOpen={isArchivedOpen}
     emptyMessage="No archived tasks."
     onStatusChange={updateStatus}
     onDelete={deleteTodo}
@@ -94,7 +100,7 @@
     title="Completed"
     items={completedTasks}
     collapsible
-    defaultOpen={false}
+    bind:isOpen={isCompletedOpen}
     emptyMessage="No completed tasks."
     onStatusChange={updateStatus}
     onDelete={deleteTodo}

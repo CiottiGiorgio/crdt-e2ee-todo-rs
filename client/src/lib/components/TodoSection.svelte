@@ -7,7 +7,7 @@
     items,
     emptyMessage = "No tasks.",
     collapsible = false,
-    defaultOpen = true,
+    isOpen = $bindable(false),
     onStatusChange,
     onDelete,
   }: {
@@ -15,13 +15,10 @@
     items: TodoItemType[];
     emptyMessage?: string;
     collapsible?: boolean;
-    defaultOpen?: boolean;
+    isOpen?: boolean;
     onStatusChange: (id: string, status: TodoStatus) => void;
     onDelete: (id: string) => void;
   } = $props();
-
-  // svelte-ignore state_referenced_locally
-  let isOpen = $state(defaultOpen);
 </script>
 
 <section class="todo-section">
