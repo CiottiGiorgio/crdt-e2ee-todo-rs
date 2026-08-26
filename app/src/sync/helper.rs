@@ -14,10 +14,3 @@ pub fn update_sync_status(
         error!("Failed to emit sync-status event: {}", e);
     }
 }
-
-/// Emits a "todos-updated" event to the UI when new changes are received and applied from the server.
-pub fn notify_todos_updated(app_handle: &tauri::AppHandle) {
-    if let Err(e) = app_handle.emit("todos-updated", ()) {
-        error!("Failed to emit todos-updated event: {}", e);
-    }
-}

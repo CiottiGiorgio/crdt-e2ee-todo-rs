@@ -1,6 +1,7 @@
 pub mod commands;
 mod constants;
 mod crypto;
+pub mod doc_manager;
 mod models;
 pub mod storage;
 mod sync;
@@ -8,8 +9,8 @@ mod sync;
 use crate::constants::TIMEOUT_GRACEFUL_SHUTDOWN_DURATION;
 use ::automerge::transaction::Transactable;
 use ::automerge::{Automerge, ObjType};
+use doc_manager::DocManager;
 use std::sync::{Arc, Mutex};
-use storage::SqliteStorage;
 use tauri::Manager;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -18,7 +19,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub struct SyncEngineState {
-    pub doc_changed_token: watch::Sender<()>,
     pub reconnect_token: watch::Sender<()>,
     pub cancel_token: CancellationToken,
     pub finished_token: CancellationToken,
@@ -26,9 +26,7 @@ pub struct SyncEngineState {
 }
 
 pub struct AppState {
-    pub doc: Arc<tokio::sync::RwLock<Automerge>>,
-    pub todos: Arc<tokio::sync::RwLock<models::TodoDoc>>,
-    pub storage: Arc<SqliteStorage>,
+    pub doc_manager: Arc<DocManager>,
     pub sync_engine: SyncEngineState,
 }
 
@@ -93,8 +91,6 @@ pub fn run() {
                     .expect("failed to initialize sqlite storage")
             };
 
-            let storage = Arc::new(storage);
-
             // Local at-rest storage holds the raw automerge document: plaintext
             // structure with per-value ciphertext. Whole-document encryption is no
             // longer applied since the sensitive values are already encrypted.
@@ -114,31 +110,30 @@ pub fn run() {
             };
             let initial_todos: models::TodoDoc = autosurgeon::hydrate(&doc)
                 .expect("failed to hydrate initial todos from doc");
-            let todos = Arc::new(tokio::sync::RwLock::new(initial_todos));
-            let doc = Arc::new(tokio::sync::RwLock::new(doc));
 
-            let (sync_engine_doc_changed_token, doc_changed_token) = watch::channel(());
             let (sync_engine_reconnect_token, reconnect_token) = watch::channel(());
             let sync_engine_cancel_token = CancellationToken::new();
             let sync_engine_finished_token = CancellationToken::new();
             let sync_engine_status = Arc::new(Mutex::new(models::SyncStatus::Connecting));
 
+            let doc_manager = Arc::new(DocManager::new(
+                doc,
+                initial_todos,
+                storage,
+                app.handle().clone(),
+            ));
+
             let fin_token = sync_engine_finished_token.clone();
             let c_token = sync_engine_cancel_token.clone();
-            let doc_clone = doc.clone();
-            let todos_clone = todos.clone();
-            let storage_clone = storage.clone();
+            let doc_manager_clone = doc_manager.clone();
             let sync_engine_status_clone = sync_engine_status.clone();
             let app_handle = app.handle().clone();
 
             tauri::async_runtime::spawn(async move {
                 sync::sync_engine(
-                    doc_clone,
-                    todos_clone,
-                    doc_changed_token,
+                    doc_manager_clone,
                     reconnect_token,
                     app_handle,
-                    storage_clone,
                     sync_engine_status_clone,
                     c_token,
                 )
@@ -147,11 +142,8 @@ pub fn run() {
             });
 
             app.manage(AppState {
-                doc,
-                todos,
-                storage,
+                doc_manager,
                 sync_engine: SyncEngineState {
-                    doc_changed_token: sync_engine_doc_changed_token,
                     reconnect_token: sync_engine_reconnect_token,
                     cancel_token: sync_engine_cancel_token,
                     finished_token: sync_engine_finished_token,

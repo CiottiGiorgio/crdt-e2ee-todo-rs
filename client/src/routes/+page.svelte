@@ -39,6 +39,10 @@
     const unlistenSync = listen<SyncStatus>("sync-status", (event) => {
       syncStatus = event.payload;
     });
+    const unlistenDbError = listen<string>("db-error", (event) => {
+      console.error("Database error:", event.payload);
+      // TODO: render as a toast notification
+    });
 
     const handleAutoReconnect = () => {
       if (syncStatus.status === "disconnected") {
@@ -68,6 +72,7 @@
     return () => {
       unlistenTodos.then((u) => u());
       unlistenSync.then((u) => u());
+      unlistenDbError.then((u) => u());
       window.removeEventListener("online", handleAutoReconnect);
       removeVisibilityListener?.();
     };

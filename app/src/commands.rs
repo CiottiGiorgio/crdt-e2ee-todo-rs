@@ -1,6 +1,5 @@
 use crate::models::{SyncStatus, TodoItem, TodoStatus};
 use crate::AppState;
-use autosurgeon::reconcile;
 use tauri::State;
 use tauri_specta::{collect_commands, Builder};
 use uuid::Uuid;
@@ -18,34 +17,23 @@ pub async fn get_sync_status(state: State<'_, AppState>) -> Result<SyncStatus, S
 #[tauri::command]
 #[specta::specta]
 pub async fn get_todos(state: State<'_, AppState>) -> Result<Vec<TodoItem>, String> {
-    let todos = state.todos.read().await;
-    Ok(todos.todos.clone())
+    Ok(state.doc_manager.todos().await)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn add_todo(text: String, state: State<'_, AppState>) -> Result<TodoItem, String> {
-    let mut doc = state.doc.write().await;
-    let mut tx = doc.transaction();
-    let mut todos = state.todos.write().await;
-
     let item = TodoItem {
         id: Uuid::new_v4().to_string(),
         text,
         status: TodoStatus::Todo,
     };
-    todos.todos.push(item.clone());
-
-    reconcile(&mut tx, &*todos).map_err(|e| e.to_string())?;
-    tx.commit();
-
-    let doc_bytes = doc.save();
+    let item_clone = item.clone();
     state
-        .storage
-        .save(&doc_bytes)
+        .doc_manager
+        .apply(move |todos| todos.push(item_clone))
         .await
         .map_err(|e| e.to_string())?;
-    let _ = state.sync_engine.doc_changed_token.send(());
     Ok(item)
 }
 
@@ -56,55 +44,38 @@ pub async fn update_todo_status(
     status: TodoStatus,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut doc = state.doc.write().await;
-    let mut tx = doc.transaction();
-    let mut todos = state.todos.write().await;
-
-    let item = todos
-        .todos
-        .iter_mut()
-        .find(|item| item.id == id)
-        .ok_or_else(|| format!("Todo item with id {} not found", id))?;
-    item.status = status;
-
-    reconcile(&mut tx, &*todos).map_err(|e| e.to_string())?;
-    tx.commit();
-
-    let doc_bytes = doc.save();
     state
-        .storage
-        .save(&doc_bytes)
+        .doc_manager
+        .apply(move |todos| {
+            let item = todos
+                .iter_mut()
+                .find(|item| item.id == id)
+                .ok_or_else(|| format!("Todo item with id {} not found", id))?;
+            item.status = status;
+            Ok(())
+        })
         .await
-        .map_err(|e| e.to_string())?;
-    let _ = state.sync_engine.doc_changed_token.send(());
-    Ok(())
+        .map_err(|e| e.to_string())?
+        .map_err(|e: String| e)
 }
 
 #[tauri::command]
 #[specta::specta]
 pub async fn delete_todo(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut doc = state.doc.write().await;
-    let mut tx = doc.transaction();
-    let mut todos = state.todos.write().await;
-
-    let initial_len = todos.todos.len();
-    todos.todos.retain(|item| item.id != id);
-
-    if todos.todos.len() == initial_len {
-        return Err(format!("Todo item with id {} not found", id));
-    }
-
-    reconcile(&mut tx, &*todos).map_err(|e| e.to_string())?;
-    tx.commit();
-
-    let doc_bytes = doc.save();
     state
-        .storage
-        .save(&doc_bytes)
+        .doc_manager
+        .apply(move |todos| {
+            let initial_len = todos.len();
+            todos.retain(|item| item.id != id);
+            if todos.len() == initial_len {
+                Err(format!("Todo item with id {} not found", id))
+            } else {
+                Ok(())
+            }
+        })
         .await
-        .map_err(|e| e.to_string())?;
-    let _ = state.sync_engine.doc_changed_token.send(());
-    Ok(())
+        .map_err(|e| e.to_string())?
+        .map_err(|e: String| e)
 }
 
 #[tauri::command]

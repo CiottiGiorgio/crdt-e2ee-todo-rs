@@ -1,18 +1,16 @@
 mod constants;
 mod helper;
 
-use crate::models::{SyncStatus, TodoDoc};
-use crate::storage::SqliteStorage;
-use automerge::sync::{Message as SyncMessage, State as AutomergeServerState, SyncDoc};
-use automerge::Automerge;
-use autosurgeon::hydrate;
+use crate::doc_manager::{DocError, DocManager};
+use crate::models::SyncStatus;
+use automerge::sync::{Message as SyncMessage, State as AutomergeServerState};
 use constants::{
     EXP_BACKOFF_FACTOR, EXP_BACKOFF_INITIAL_DURATION, EXP_BACKOFF_MAX_DURATION,
     EXP_BACKOFF_MAX_RETRIES, WS_URL,
 };
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use helper::{notify_todos_updated, update_sync_status};
+use helper::update_sync_status;
 use rand::RngExt;
 use std::cmp::min;
 use std::sync::{Arc, Mutex};
@@ -42,26 +40,14 @@ enum SyncLoopError {
     #[error("Wake up signal error: {0}")]
     WakeUp(#[from] watch::error::RecvError),
 
-    #[error("Automerge sync error: {0}")]
-    Automerge(#[from] automerge::AutomergeError),
-
-    #[error("Database persistence error: {0}")]
-    Database(#[from] sqlx::Error),
-
-    #[error("Database persistence ({db}) and WebSocket transport ({ws}) both failed")]
-    DatabaseAndWebSocket {
-        db: sqlx::Error,
-        ws: tungstenite::Error,
-    },
+    #[error("Document error: {0}")]
+    Doc(#[from] DocError),
 }
 
 pub async fn sync_engine(
-    doc: Arc<tokio::sync::RwLock<Automerge>>,
-    todos: Arc<tokio::sync::RwLock<TodoDoc>>,
-    doc_changed_token: watch::Receiver<()>,
+    doc_manager: Arc<DocManager>,
     mut reconnect_token: watch::Receiver<()>,
     app_handle: tauri::AppHandle,
-    storage: Arc<SqliteStorage>,
     status: Arc<Mutex<SyncStatus>>,
     cancellation_token: CancellationToken,
 ) {
@@ -70,9 +56,6 @@ pub async fn sync_engine(
 
         update_sync_status(&status, &app_handle, SyncStatus::Connecting);
 
-        // FIXME: If the sync_loop crashed because of db issues, it also dropped the websocket.
-        //  However, after waiting, if we can acquire a websocket again the backoff duration resets.
-        //  This is not ideal. We'd also like to keep persisting changes if we can't connect to the server.
         loop {
             info!("Attempting to connect to sync server at {}", WS_URL);
 
@@ -82,13 +65,9 @@ pub async fn sync_engine(
                 let (mut sender, mut receiver) = ws_stream.split();
                 retry_count = 0;
                 let loop_result = sync_loop(
-                    doc.clone(),
-                    todos.clone(),
-                    app_handle.clone(),
+                    &doc_manager,
                     &mut sender,
                     &mut receiver,
-                    storage.clone(),
-                    doc_changed_token.clone(),
                     cancellation_token.clone(),
                 )
                 .await;
@@ -138,28 +117,25 @@ pub async fn sync_engine(
 }
 
 async fn sync_loop(
-    doc: Arc<tokio::sync::RwLock<Automerge>>,
-    todos: Arc<tokio::sync::RwLock<TodoDoc>>,
-    app_handle: tauri::AppHandle,
+    doc_manager: &DocManager,
     tx: &mut WsSender,
     rx: &mut WsReceiver,
-    storage: Arc<SqliteStorage>,
-    mut doc_changed_token: watch::Receiver<()>,
     cancellation: CancellationToken,
 ) -> Result<(), SyncLoopError> {
     let mut server_state = AutomergeServerState::new();
+    let mut doc_changed_token = doc_manager.subscribe();
 
-    if let Some(sync_handshake) = doc.read().await.generate_sync_message(&mut server_state) {
+    if let Some(sync_handshake) = doc_manager.generate_sync_message(&mut server_state).await {
         tx.send(sync_handshake.encode().into()).await?;
     }
 
     loop {
         tokio::select! {
-            msg = rx.next() => handle_incoming_message(msg, &doc, &todos, &mut server_state, &storage, &app_handle, tx).await?,
+            msg = rx.next() => handle_incoming_message(msg, doc_manager, &mut server_state, tx).await?,
 
             doc_changed_res = doc_changed_token.changed() => {
                 doc_changed_res?;
-                if let Some(sync_msg) = doc.read().await.generate_sync_message(&mut server_state) {
+                if let Some(sync_msg) = doc_manager.generate_sync_message(&mut server_state).await {
                     tx.send(sync_msg.encode().into()).await?;
                 }
             }
@@ -176,11 +152,8 @@ async fn sync_loop(
 
 async fn handle_incoming_message(
     msg: Option<Result<Message, tungstenite::Error>>,
-    doc: &tokio::sync::RwLock<Automerge>,
-    todos: &tokio::sync::RwLock<TodoDoc>,
+    doc_manager: &DocManager,
     server_state: &mut AutomergeServerState,
-    storage: &SqliteStorage,
-    app_handle: &tauri::AppHandle,
     tx: &mut WsSender,
 ) -> Result<(), SyncLoopError> {
     let msg = match msg {
@@ -196,57 +169,15 @@ async fn handle_incoming_message(
             return Ok(());
         }
     };
-    let msg = SyncMessage::decode(&data)?;
+    let sync_msg = SyncMessage::decode(&data)?;
     debug!("Received a sync message");
 
-    let (bytes_to_save, response_msg) = {
-        let mut doc_guard = doc.write().await;
-        let heads_pre_merge = doc_guard.get_heads();
-        doc_guard.receive_sync_message(server_state, msg)?;
-        let doc_guard = doc_guard.downgrade();
-        let heads_post_merge = doc_guard.get_heads();
+    doc_manager.receive_sync(server_state, sync_msg).await?;
 
-        let bytes_to_save = if heads_pre_merge != heads_post_merge {
-            info!(
-                "Applied sync changes (heads: {:?} -> {:?}",
-                heads_pre_merge, heads_post_merge
-            );
-            if let Ok(hydrated) = hydrate::<_, TodoDoc>(&*doc_guard) {
-                *todos.write().await = hydrated;
-            }
-            Some(doc_guard.save())
-        } else {
-            debug!("Processed sync message (heads unchanged)");
-            None
-        };
-
-        let response_msg = doc_guard.generate_sync_message(server_state);
-
-        (bytes_to_save, response_msg)
-    };
-
-    let (save_res, send_res) = tokio::join!(
-        async {
-            if let Some(bytes_to_save) = bytes_to_save {
-                storage.save(&bytes_to_save).await?;
-                debug!("Document was persisted to the database");
-                notify_todos_updated(app_handle);
-            }
-            Ok(())
-        },
-        async {
-            if let Some(response_msg) = response_msg {
-                tx.send(response_msg.encode().into()).await?;
-                info!("Sent a sync response");
-            }
-            Ok(())
-        }
-    );
-
-    match (save_res, send_res) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(db_err), Ok(())) => Err(SyncLoopError::Database(db_err)),
-        (Ok(()), Err(ws_err)) => Err(SyncLoopError::WebSocket(ws_err)),
-        (Err(db), Err(ws)) => Err(SyncLoopError::DatabaseAndWebSocket { db, ws }),
+    if let Some(response) = doc_manager.generate_sync_message(server_state).await {
+        tx.send(response.encode().into()).await?;
+        info!("Sent a sync response");
     }
+
+    Ok(())
 }
