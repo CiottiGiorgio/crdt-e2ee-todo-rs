@@ -20,8 +20,8 @@
   let isCompletedOpen = $state(false);
 
   const todoTasksQuery = useTodosByStatus("todo");
-  const archivedTasksQuery = useTodosByStatus("archived", () => isArchivedOpen);
-  const completedTasksQuery = useTodosByStatus("completed", () => isCompletedOpen);
+  const archivedTasksQuery = useTodosByStatus("archived");
+  const completedTasksQuery = useTodosByStatus("completed");
 
   const addTodoMutation = useAddTodo();
   const updateStatusMutation = useUpdateTodoStatus();

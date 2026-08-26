@@ -7,10 +7,7 @@ export const todoKeys = {
   byStatus: (status: TodoStatus) => [...todoKeys.all, status] as const,
 };
 
-export function useTodosByStatus(
-  status: TodoStatus,
-  enabled: () => boolean = () => true
-) {
+export function useTodosByStatus(status: TodoStatus) {
   return createQuery(() => ({
     queryKey: todoKeys.byStatus(status),
     queryFn: async () => {
@@ -18,7 +15,6 @@ export function useTodosByStatus(
       if (res.status === "error") throw new Error(res.error);
       return res.data;
     },
-    enabled: enabled(),
   }));
 }
 
