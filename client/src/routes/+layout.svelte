@@ -1,4 +1,5 @@
 <script lang="ts">
+  import "../app.css";
   import { Toaster } from "svelte-sonner";
   import { QueryClient, QueryClientProvider } from "@tanstack/svelte-query";
   import type { Snippet } from "svelte";

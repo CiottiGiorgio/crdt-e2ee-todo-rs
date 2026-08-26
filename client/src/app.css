@@ -1,0 +1,10 @@
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+input,
+textarea {
+  user-select: auto;
+  -webkit-user-select: auto;
+}
