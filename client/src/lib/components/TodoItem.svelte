@@ -83,6 +83,15 @@
   .item-actions {
     display: flex;
     gap: 6px;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s ease, visibility 0.15s ease;
+  }
+
+  .todo-item:hover .item-actions,
+  .todo-item:focus-within .item-actions {
+    opacity: 1;
+    visibility: visible;
   }
 
   .action-btn,
@@ -97,5 +106,11 @@
 
   .action-btn:hover {
     background-color: #f0f0f0;
+  }
+
+  .delete-btn:hover {
+    background-color: #fee2e2;
+    border-color: #fca5a5;
+    color: #b91c1c;
   }
 </style>
