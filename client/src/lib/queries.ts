@@ -1,0 +1,67 @@
+import { createQuery, createMutation, useQueryClient } from "@tanstack/svelte-query";
+import { commands, type TodoStatus } from "$lib/bindings";
+import { toast } from "svelte-sonner";
+
+export const todoKeys = {
+  all: ["todos"] as const,
+};
+
+export function useTodos() {
+  return createQuery(() => ({
+    queryKey: todoKeys.all,
+    queryFn: async () => {
+      const res = await commands.getTodos();
+      if (res.status === "error") throw new Error(res.error);
+      return res.data;
+    },
+  }));
+}
+
+export function useAddTodo() {
+  const queryClient = useQueryClient();
+  return createMutation(() => ({
+    mutationFn: async (text: string) => {
+      const res = await commands.addTodo(text);
+      if (res.status === "error") throw new Error(res.error);
+      return res.data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: todoKeys.all });
+    },
+    onError: (err: Error) => {
+      toast.error("Failed to add todo", { description: err.message });
+    },
+  }));
+}
+
+export function useUpdateTodoStatus() {
+  const queryClient = useQueryClient();
+  return createMutation(() => ({
+    mutationFn: async ({ id, status }: { id: string; status: TodoStatus }) => {
+      const res = await commands.updateTodoStatus(id, status);
+      if (res.status === "error") throw new Error(res.error);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: todoKeys.all });
+    },
+    onError: (err: Error) => {
+      toast.error("Failed to update todo status", { description: err.message });
+    },
+  }));
+}
+
+export function useDeleteTodo() {
+  const queryClient = useQueryClient();
+  return createMutation(() => ({
+    mutationFn: async (id: string) => {
+      const res = await commands.deleteTodo(id);
+      if (res.status === "error") throw new Error(res.error);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: todoKeys.all });
+    },
+    onError: (err: Error) => {
+      toast.error("Failed to delete todo", { description: err.message });
+    },
+  }));
+}
